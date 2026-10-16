@@ -1,0 +1,24 @@
+[project]
+name = "tarclub"
+version = "0.1.0"
+description = "Discord society & club governance, dynamic theming, and annual committee term management bot for TARUMT"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "discord.py>=2.4.0",
+    "aiosqlite>=0.20.0",
+    "python-dotenv>=1.0.0",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]
+ignore = ["B008"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
