@@ -90,7 +90,7 @@ async def test_add_custom_position_and_update(db: Database):
     assert custom_id > 0
 
     positions = await db.get_positions(society_id)
-    assert len(positions) == 15
+    assert len(positions) == 16
     ai_pos = next(p for p in positions if p["title"] == "AI Lead")
     assert ai_pos["department"] == "DIRECTORSHIP"
     assert ai_pos["hierarchy_order"] == 15
@@ -100,6 +100,72 @@ async def test_add_custom_position_and_update(db: Database):
     updated_positions = await db.get_positions(society_id)
     ml_pos = next(p for p in updated_positions if p["id"] == custom_id)
     assert ml_pos["title"] == "Machine Learning Lead"
+
+
+@pytest.mark.asyncio
+async def test_normal_member_privilege_verified_vs_unverified(db: Database):
+    guild_id = 998877665544
+    society_id = await db.register_society(
+        guild_id=guild_id,
+        society_code="TARUMT-ROBOT",
+        name="Robotics Society",
+        faculty="FOET",
+    )
+
+    positions = await db.get_positions(society_id)
+    member_pos = next(p for p in positions if p["title"] == "General Member")
+    assert member_pos["hierarchy_order"] == 15
+    assert member_pos["department"] == "MEMBERSHIP"
+
+    term = await db.get_active_term(society_id)
+    assert term is not None
+
+    user_verified = 111122223333
+    user_unverified = 444455556666
+
+    # 1. Appoint verified student as General Member
+    await db.assign_committee_member(
+        term_id=term["id"],
+        position_id=member_pos["id"],
+        user_id=user_verified,
+        student_id="25WMR01234",
+        is_verified=True,
+    )
+
+    # 2. Appoint non-verified user as General Member
+    await db.assign_committee_member(
+        term_id=term["id"],
+        position_id=member_pos["id"],
+        user_id=user_unverified,
+        is_verified=False,
+    )
+
+    # 3. Assert verified member permissions (full normal member bundle)
+    perms_v = await db.get_user_permissions(society_id, user_verified)
+    assert has_permission(perms_v, SocietyPermission.ACCESS_CLUB_CHAT) is True
+    assert has_permission(perms_v, SocietyPermission.PARTICIPATE_EVENTS) is True
+    assert has_permission(perms_v, SocietyPermission.VOTE_ELECTION) is True
+    assert has_permission(perms_v, SocietyPermission.MANAGE_SOCIETY) is False
+    assert has_permission(perms_v, SocietyPermission.APPROVE_EXPENSES) is False
+
+    # 4. Assert non-verified member permissions (basic chat, NO voting or exclusive events)
+    perms_uv = await db.get_user_permissions(society_id, user_unverified)
+    assert has_permission(perms_uv, SocietyPermission.ACCESS_CLUB_CHAT) is True
+    assert has_permission(perms_uv, SocietyPermission.PARTICIPATE_EVENTS) is False
+    assert has_permission(perms_uv, SocietyPermission.VOTE_ELECTION) is False
+    assert has_permission(perms_uv, SocietyPermission.MANAGE_SOCIETY) is False
+
+    # 5. Verify active roster records
+    roster = await db.get_active_roster(society_id)
+    assigned_members = [r for r in roster if r["title"] == "General Member"]
+    assert len(assigned_members) == 2
+
+    m_v = next(m for m in assigned_members if m["user_id"] == user_verified)
+    assert m_v["is_verified_student"] == 1
+    assert m_v["student_id"] == "25WMR01234"
+
+    m_uv = next(m for m in assigned_members if m["user_id"] == user_unverified)
+    assert m_uv["is_verified_student"] == 0
 
 
 @pytest.mark.asyncio

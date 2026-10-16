@@ -8,40 +8,42 @@ import logging
 from typing import Any
 
 from tarclub.db.base import DatabaseBase
+from tarclub.services.rbac_service import SocietyPermission
 
 logger = logging.getLogger("tarclub.database")
 
-# Standard 14-Role Starter Template
+# Standard 15-Role Starter Template including leadership and general membership
 DEFAULT_TEMPLATE_POSITIONS = [
-    {"title": "Chairperson", "department": "PRESIDIUM", "hierarchy": 1, "rbac": 0x0FFF},
-    {"title": "Vice Chairperson", "department": "PRESIDIUM", "hierarchy": 2, "rbac": 0x07FF},
-    {"title": "Deputy Chairperson", "department": "PRESIDIUM", "hierarchy": 3, "rbac": 0x07FF},
-    {"title": "Deputy Vice Chairperson", "department": "PRESIDIUM", "hierarchy": 4, "rbac": 0x07FF},
-    {"title": "Secretary", "department": "SECRETARIAT", "hierarchy": 5, "rbac": 0x051F},
-    {"title": "Deputy Secretary", "department": "SECRETARIAT", "hierarchy": 6, "rbac": 0x0513},
-    {"title": "Treasurer", "department": "FINANCE", "hierarchy": 7, "rbac": 0x05D0},
-    {"title": "Deputy Treasurer", "department": "FINANCE", "hierarchy": 8, "rbac": 0x0550},
+    {"title": "Chairperson", "department": "PRESIDIUM", "hierarchy": 1, "rbac": 0x7FFF},
+    {"title": "Vice Chairperson", "department": "PRESIDIUM", "hierarchy": 2, "rbac": 0x77FF},
+    {"title": "Deputy Chairperson", "department": "PRESIDIUM", "hierarchy": 3, "rbac": 0x77FF},
+    {"title": "Deputy Vice Chairperson", "department": "PRESIDIUM", "hierarchy": 4, "rbac": 0x77FF},
+    {"title": "Secretary", "department": "SECRETARIAT", "hierarchy": 5, "rbac": 0x751F},
+    {"title": "Deputy Secretary", "department": "SECRETARIAT", "hierarchy": 6, "rbac": 0x7513},
+    {"title": "Treasurer", "department": "FINANCE", "hierarchy": 7, "rbac": 0x75D0},
+    {"title": "Deputy Treasurer", "department": "FINANCE", "hierarchy": 8, "rbac": 0x7550},
     {
         "title": "Programme & Activities Director",
         "department": "DIRECTORSHIP",
         "hierarchy": 9,
-        "rbac": 0x0030,
+        "rbac": 0x7030,
     },
     {
         "title": "Technical Resource Director",
         "department": "DIRECTORSHIP",
         "hierarchy": 10,
-        "rbac": 0x0210,
+        "rbac": 0x7210,
     },
-    {"title": "Publicity Director", "department": "DIRECTORSHIP", "hierarchy": 11, "rbac": 0x0010},
-    {"title": "Publicity Member", "department": "DIRECTORSHIP", "hierarchy": 12, "rbac": 0x0000},
+    {"title": "Publicity Director", "department": "DIRECTORSHIP", "hierarchy": 11, "rbac": 0x7010},
+    {"title": "Publicity Member", "department": "DIRECTORSHIP", "hierarchy": 12, "rbac": 0x7000},
     {
         "title": "Art and Promotion Director",
         "department": "DIRECTORSHIP",
         "hierarchy": 13,
-        "rbac": 0x0010,
+        "rbac": 0x7010,
     },
-    {"title": "Internal Auditor", "department": "DIRECTORSHIP", "hierarchy": 14, "rbac": 0x0100},
+    {"title": "Internal Auditor", "department": "DIRECTORSHIP", "hierarchy": 14, "rbac": 0x7100},
+    {"title": "General Member", "department": "MEMBERSHIP", "hierarchy": 15, "rbac": 0x7000},
 ]
 
 
@@ -132,6 +134,25 @@ class Database(DatabaseBase):
             );
             """
         )
+        # Ensure template positions include General Member for any existing societies
+        cursor = await self.conn.execute("SELECT id FROM societies;")
+        soc_rows = await cursor.fetchall()
+        for s_row in soc_rows:
+            s_id = s_row[0]
+            chk = await self.conn.execute(
+                "SELECT id FROM positions WHERE society_id = ? AND title = 'General Member';",
+                (s_id,),
+            )
+            if not await chk.fetchone():
+                await self.conn.execute(
+                    """
+                    INSERT INTO positions (
+                        society_id, title, department, hierarchy_order, rbac_flags, is_template
+                    ) VALUES (?, 'General Member', 'MEMBERSHIP', 15, ?, 1);
+                    """,
+                    (s_id, SocietyPermission.MEMBER_CORE.value),
+                )
+
         await self.conn.commit()
         logger.info("TARClub database initialized with WAL mode and schema integrity.")
 
@@ -280,7 +301,7 @@ class Database(DatabaseBase):
         """Resolve bitwise aggregated RBAC permissions for a user in the active term."""
         cursor = await self.conn.execute(
             """
-            SELECT p.rbac_flags
+            SELECT p.rbac_flags, cm.is_verified_student
             FROM committee_members cm
             JOIN terms t ON cm.term_id = t.id AND t.is_active = 1
             JOIN positions p ON cm.position_id = p.id
@@ -291,7 +312,12 @@ class Database(DatabaseBase):
         rows = await cursor.fetchall()
         total = 0
         for r in rows:
-            total |= r["rbac_flags"]
+            flags = r["rbac_flags"]
+            if not r["is_verified_student"]:
+                # Strip out verified-only privileges (e.g. voting, exclusive events)
+                flags &= ~SocietyPermission.VOTE_ELECTION.value
+                flags &= ~SocietyPermission.PARTICIPATE_EVENTS.value
+            total |= flags
         return total
 
     async def update_theme(

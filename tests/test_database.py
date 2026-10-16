@@ -22,7 +22,7 @@ async def test_db(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_register_society_provisions_14_roles(test_db: Database):
+async def test_register_society_provisions_15_roles(test_db: Database):
     guild_id = 999123456789
     society_id = await test_db.register_society(
         guild_id=guild_id,
@@ -43,11 +43,14 @@ async def test_register_society_provisions_14_roles(test_db: Database):
     assert society["primary_color"] == "#1E88E5"
 
     positions = await test_db.get_positions(society_id)
-    assert len(positions) == 14
+    assert len(positions) == 15
     assert positions[0]["title"] == "Chairperson"
     assert positions[0]["hierarchy_order"] == 1
     assert positions[13]["title"] == "Internal Auditor"
     assert positions[13]["hierarchy_order"] == 14
+    assert positions[14]["title"] == "General Member"
+    assert positions[14]["department"] == "MEMBERSHIP"
+    assert positions[14]["hierarchy_order"] == 15
 
     term = await test_db.get_active_term(society_id)
     assert term is not None

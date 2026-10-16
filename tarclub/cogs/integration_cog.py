@@ -184,12 +184,20 @@ class IntegrationCog(commands.GroupCog, group_name="integrate-tarveri"):
                 member,
                 tarveri_db_path=self.settings.tarveri_db_path,
             )
+            dept = item.get("department", "")
             if is_verified:
                 verified_count += 1
                 breakdown_lines.append(f"🟢 **{title}**: {member.mention} — `{role_or_fac}`")
             else:
-                unverified_count += 1
-                breakdown_lines.append(f"🔴 **{title}**: {member.mention} — **Unverified Student**")
+                if dept == "MEMBERSHIP":
+                    breakdown_lines.append(
+                        f"⚪ **{title}**: {member.mention} — *Normal Member (Non-Verified)*"
+                    )
+                else:
+                    unverified_count += 1
+                    breakdown_lines.append(
+                        f"🔴 **{title}**: {member.mention} — **Unverified Executive**"
+                    )
 
         status_color = 0x00E676 if unverified_count == 0 and missing_count == 0 else 0xFF9800
         warn_count = unverified_count + missing_count

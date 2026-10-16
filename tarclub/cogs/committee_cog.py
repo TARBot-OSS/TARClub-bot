@@ -107,13 +107,21 @@ class CommitteeCog(commands.GroupCog, group_name="committee"):
             "SECRETARIAT": [],
             "FINANCE": [],
             "DIRECTORSHIP": [],
+            "MEMBERSHIP": [],
             "OTHER": [],
         }
 
         for row in roster_data:
             dept = row["department"] if row["department"] in departments else "OTHER"
             holder = f"<@{row['user_id']}>" if row.get("user_id") else "*Vacant*"
-            verified_tag = " `[Verified Student]`" if row.get("is_verified_student") else ""
+            if row.get("user_id"):
+                verified_tag = (
+                    " `[Verified Student]`"
+                    if row.get("is_verified_student")
+                    else " `[Non-Verified]`"
+                )
+            else:
+                verified_tag = ""
             departments[dept].append(f"• **{row['title']}:** {holder}{verified_tag}")
 
         dept_labels = {
@@ -121,6 +129,7 @@ class CommitteeCog(commands.GroupCog, group_name="committee"):
             "SECRETARIAT": "📝 Secretariat",
             "FINANCE": "💰 Treasury & Finance",
             "DIRECTORSHIP": "🎯 Directorships & Operations",
+            "MEMBERSHIP": "👥 General Membership",
             "OTHER": "📌 Additional Positions",
         }
 
@@ -191,15 +200,21 @@ class CommitteeCog(commands.GroupCog, group_name="committee"):
             member, tarveri_db_path=tarveri_db
         )
 
-        if enforce_gating and not is_verified:
+        is_normal_member = (
+            target_pos.get("department") == "MEMBERSHIP"
+            or target_pos.get("hierarchy_order", 0) >= 15
+        )
+
+        if enforce_gating and not is_verified and not is_normal_member:
             # Check if caller has bypass permission
             user_mask = await self.db.get_user_permissions(society["id"], interaction.user.id)
             has_bypass = has_permission(user_mask, SocietyPermission.BYPASS_STUDENT_GATE)
             is_owner = interaction.user.id == interaction.guild.owner_id
             if not has_bypass and not is_owner:
                 await interaction.followup.send(
-                    f"❌ Cannot appoint {member.mention}: Committee members must be "
-                    "verified active TAR UMT students through TARVeri.",
+                    f"❌ Cannot appoint {member.mention}: Executive committee positions require "
+                    "verified active TAR UMT students through TARVeri.\n"
+                    "*(Tip: Normal members can be assigned without executive verification)*",
                     ephemeral=True,
                 )
                 return
@@ -214,7 +229,13 @@ class CommitteeCog(commands.GroupCog, group_name="committee"):
 
         active_label = active_term["term_name"]
         soc_pos_title = target_pos["title"]
-        v_tag = " `[Verified Student]`" if is_verified else ""
+        if is_verified:
+            v_tag = " `[Verified Student]`"
+        elif is_normal_member:
+            v_tag = " `[Normal Member - Non-Verified]`"
+        else:
+            v_tag = " `[Executive Bypass]`"
+
         msg = f"✅ Appointed {member.mention} as **{soc_pos_title}** (`{active_label}`){v_tag}."
         await interaction.followup.send(msg, ephemeral=False)
 
