@@ -29,7 +29,7 @@ from prompt_toolkit.layout.containers import Float, FloatContainer, HSplit
 from prompt_toolkit.layout.layout import Layout
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.styles import Style
-from prompt_toolkit.widgets import HorizontalLine, TextArea
+from prompt_toolkit.widgets import Frame, TextArea
 
 try:
     import pam
@@ -238,6 +238,7 @@ class ConsoleService:
         self._task: asyncio.Task | None = None
         self.app: Application[None] | None = None
         self.log_area: TextArea | None = None
+        self.output_area: TextArea | None = None
         self.input_box: TextArea | None = None
 
         # Linux PAM Authentication & Console Security State
@@ -266,7 +267,7 @@ class ConsoleService:
                     "?": None,
                     "login": None,
                     "setup-admin": None,
-                    "clear": None,
+                    "clear": {"output": None, "logs": None, "all": None},
                     "stop": None,
                     "exit": None,
                     "quit": None,
@@ -297,7 +298,7 @@ class ConsoleService:
                 "lock": None,
                 "logout": None,
                 "user": {"list": None, "add": None, "remove": None},
-                "clear": None,
+                "clear": {"output": None, "logs": None, "all": None},
                 "stop": None,
                 "exit": None,
                 "quit": None,
@@ -325,11 +326,32 @@ class ConsoleService:
             except RuntimeError:
                 self._loop.call_soon_threadsafe(_update)
 
+    def append_output(self, text: str) -> None:
+        """Appends output text to the command output pane and scrolls to bottom."""
+        if not self.is_active or not self.output_area or not self.app:
+            return
+
+        def _update() -> None:
+            if self.output_area and self.app:
+                self.output_area.text += f"{text}\n"
+                self.output_area.buffer.cursor_position = len(self.output_area.text)
+                self.app.invalidate()
+
+        if self._loop and self._loop.is_running():
+            try:
+                curr = asyncio.get_running_loop()
+                if curr is self._loop:
+                    _update()
+                else:
+                    self._loop.call_soon_threadsafe(_update)
+            except RuntimeError:
+                self._loop.call_soon_threadsafe(_update)
+
     def write_output(self, text: str) -> None:
-        """Outputs text cleanly to log_area if TUI is active, else sys.stdout."""
+        """Outputs text cleanly to output_area if TUI is active, else sys.stdout."""
         if self.is_active:
             for line in str(text).splitlines():
-                self.append_log(line)
+                self.append_output(line)
         else:
             for line in str(text).splitlines():
                 sys.stdout.write(f"{line}\n")
@@ -386,18 +408,12 @@ class ConsoleService:
         history_file.parent.mkdir(parents=True, exist_ok=True)
         history = FileHistory(str(history_file))
 
-        initial_text = "\n".join(ConsoleAwareStreamHandler._log_buffer)
-        if initial_text:
-            initial_text += "\n"
-        banner = (
-            "🎮 TARClub Console initialized.\n"
-            "🔒 Console is locked. Type 'login <username>' to authenticate "
-            "(or 'setup-admin <username>' if first time).\n"
-        )
-        initial_text += banner
+        initial_logs = "\n".join(ConsoleAwareStreamHandler._log_buffer)
+        if initial_logs:
+            initial_logs += "\n"
 
         self.log_area = TextArea(
-            text=initial_text,
+            text=initial_logs,
             read_only=True,
             scrollbar=True,
             wrap_lines=True,
@@ -405,9 +421,25 @@ class ConsoleService:
         )
         self.log_area.buffer.cursor_position = len(self.log_area.text)
 
+        initial_output = (
+            "🎮 TARClub Console initialized.\n"
+            "🔒 Console is locked. Type 'login <username>' to authenticate "
+            "(or 'setup-admin <username>' if first time).\n"
+        )
+        self.output_area = TextArea(
+            text=initial_output,
+            read_only=True,
+            scrollbar=True,
+            wrap_lines=True,
+            focusable=False,
+        )
+        self.output_area.buffer.cursor_position = len(self.output_area.text)
+
         style = Style.from_dict(
             {
                 "text-area.prompt": "ansicyan bold",
+                "frame.label": "ansigreen bold",
+                "frame.border": "#45475a",
                 "completion-menu": "bg:#1e1e2e #cdd6f4",
                 "completion-menu.completion": "bg:#1e1e2e #cdd6f4",
                 "completion-menu.completion.current": "bg:#45475a #89b4fa bold",
@@ -431,11 +463,31 @@ class ConsoleService:
 
         @kb.add("pageup")
         def _scroll_up(event):
-            if self.log_area:
-                self.log_area.buffer.cursor_up(count=10)
+            if self.output_area:
+                self.output_area.buffer.cursor_up(count=10)
 
         @kb.add("pagedown")
         def _scroll_down(event):
+            if self.output_area:
+                self.output_area.buffer.cursor_down(count=10)
+
+        @kb.add("c-up")
+        def _scroll_logs_up(event):
+            if self.log_area:
+                self.log_area.buffer.cursor_up(count=10)
+
+        @kb.add("c-down")
+        def _scroll_logs_down(event):
+            if self.log_area:
+                self.log_area.buffer.cursor_down(count=10)
+
+        @kb.add("s-pageup")
+        def _scroll_logs_sup(event):
+            if self.log_area:
+                self.log_area.buffer.cursor_up(count=10)
+
+        @kb.add("s-pagedown")
+        def _scroll_logs_sdown(event):
             if self.log_area:
                 self.log_area.buffer.cursor_down(count=10)
 
@@ -504,8 +556,8 @@ class ConsoleService:
 
         body = HSplit(
             [
-                self.log_area,
-                HorizontalLine(),
+                Frame(self.log_area, title="📡 System Logs (Ctrl+Up/Down to scroll)"),
+                Frame(self.output_area, title="💻 Terminal Output (PgUp/PgDn to scroll)"),
                 self.input_box,
             ]
         )
@@ -556,7 +608,7 @@ class ConsoleService:
                 if self.app:
                     self.app.invalidate()
                 return False
-            self.append_log(f"{self._get_prompt()}********")
+            self.write_output(f"{self._get_prompt()}********")
             if self._loop and self._loop.is_running():
                 asyncio.create_task(self._handle_password_input(text))
             return False
@@ -564,7 +616,7 @@ class ConsoleService:
         cmd = text.strip()
         if cmd:
             logger.info("[CMD] Executed: %s", cmd)
-            self.append_log(f"{self._get_prompt()}{cmd}")
+            self.write_output(f"{self._get_prompt()}{cmd}")
             if self._loop and self._loop.is_running():
                 asyncio.create_task(self.handle_command(cmd))
         return False
@@ -602,7 +654,7 @@ class ConsoleService:
                 self._cmd_help()
                 return
             elif cmd == "clear":
-                self._cmd_clear()
+                self._cmd_clear(args)
                 return
             elif cmd in ("stop", "exit", "quit"):
                 await self._cmd_stop()
@@ -986,9 +1038,20 @@ class ConsoleService:
         except Exception as exc:
             logger.debug("Security alert dispatch error: %s", exc)
 
-    def _cmd_clear(self) -> None:
-        if self.is_active and self.log_area:
-            self.log_area.text = ""
+    def _cmd_clear(self, args: list[str] | None = None) -> None:
+        target = args[0].lower() if args else "output"
+        if self.is_active:
+            if target in ("all", "both"):
+                if self.log_area:
+                    self.log_area.text = ""
+                if self.output_area:
+                    self.output_area.text = ""
+            elif target in ("logs", "log"):
+                if self.log_area:
+                    self.log_area.text = ""
+            else:
+                if self.output_area:
+                    self.output_area.text = ""
             if self.app:
                 self.app.invalidate()
         elif sys.stdout is not None and hasattr(sys.stdout, "isatty") and sys.stdout.isatty():
