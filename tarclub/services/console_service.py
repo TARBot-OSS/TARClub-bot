@@ -10,16 +10,19 @@ session with full scrollback support.
 from __future__ import annotations
 
 import asyncio
+import getpass
 import logging
 import shlex
+import socket
 import sys
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import discord
 from prompt_toolkit.application import Application
-from prompt_toolkit.completion import NestedCompleter
-from prompt_toolkit.filters import has_completions
+from prompt_toolkit.completion import DynamicCompleter, NestedCompleter
+from prompt_toolkit.filters import Condition, has_completions
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout.containers import Float, FloatContainer, HSplit
@@ -27,6 +30,11 @@ from prompt_toolkit.layout.layout import Layout
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import HorizontalLine, TextArea
+
+try:
+    import pam
+except ImportError:
+    pam = None
 
 if TYPE_CHECKING:
     from tarclub.bot import TARClubBot
@@ -48,6 +56,22 @@ AVAILABLE_COMMANDS = [
     "reject",
     "say",
     "eval",
+    "login",
+    "setup-admin",
+    "lock",
+    "logout",
+    "user",
+    "clear",
+    "stop",
+    "exit",
+    "quit",
+]
+
+AUTH_LOCKED_COMMANDS = [
+    "help",
+    "?",
+    "login",
+    "setup-admin",
     "clear",
     "stop",
     "exit",
@@ -68,6 +92,10 @@ FACULTY_CODES = [
 HELP_LINES = [
     "======================= TARClub Console Commands =======================",
     "  help, ?                               Show this interactive help reference",
+    "  login <username>                      Authenticate via Linux PAM to unlock console",
+    "  setup-admin <username>                Initialize the first console administrator",
+    "  lock, logout                          Lock console session",
+    "  user <list|add|remove> [name]         Manage authorized console administrators",
     "  status                                View bot latency, connected guilds, societies",
     "  guilds                                List connected Discord servers",
     "  societies                             List all registered societies and visibility",
@@ -109,6 +137,8 @@ def _console_completer(text: str, state: int) -> str | None:
         matches = [
             opt for opt in ["active", "used", "revoked", "all"] if opt.startswith(text.lower())
         ]
+    elif words == ["user"]:
+        matches = [opt for opt in ["list", "add", "remove"] if opt.startswith(text.lower())]
     elif len(words) == 2 and words[0] == "privacy":
         matches = [opt for opt in ["true", "false"] if opt.startswith(text.lower())]
     elif words == ["applications"]:
@@ -149,9 +179,8 @@ class ConsoleAwareStreamHandler(logging.StreamHandler):
             if len(ConsoleAwareStreamHandler._log_buffer) > 1000:
                 ConsoleAwareStreamHandler._log_buffer.pop(0)
 
-            if (
-                ConsoleAwareStreamHandler._console_instance
-                and getattr(ConsoleAwareStreamHandler._console_instance, "is_active", False)
+            if ConsoleAwareStreamHandler._console_instance and getattr(
+                ConsoleAwareStreamHandler._console_instance, "is_active", False
             ):
                 ConsoleAwareStreamHandler._console_instance.append_log(msg)
             else:
@@ -183,7 +212,70 @@ class ConsoleService:
         self.app: Application[None] | None = None
         self.log_area: TextArea | None = None
         self.input_box: TextArea | None = None
-        self.prompt = "tarclub> "
+
+        # Linux PAM Authentication & Console Security State
+        self.is_authenticated: bool = False
+        self.authenticated_user: str | None = None
+        self._is_password_mode: bool = False
+        self._pending_auth_user: str | None = None
+        self._pending_auth_action: str = "login"
+        self._failed_attempts: int = 0
+        self._locked_until: float = 0.0
+
+    def _get_prompt(self) -> str:
+        if self._is_password_mode:
+            return f"Password for {self._pending_auth_user}: "
+        if self.is_authenticated:
+            return f"tarclub [{self.authenticated_user}]> "
+        return "tarclub [LOCKED]> "
+
+    def _get_completer(self) -> NestedCompleter | None:
+        if self._is_password_mode:
+            return None
+        if not self.is_authenticated:
+            return NestedCompleter.from_nested_dict(
+                {
+                    "help": None,
+                    "?": None,
+                    "login": None,
+                    "setup-admin": None,
+                    "clear": None,
+                    "stop": None,
+                    "exit": None,
+                    "quit": None,
+                }
+            )
+        return NestedCompleter.from_nested_dict(
+            {
+                "help": None,
+                "?": None,
+                "status": None,
+                "guilds": None,
+                "societies": None,
+                "privacy": {"true": None, "false": None},
+                "token": {
+                    "create": None,
+                    "list": {"active": None, "used": None, "revoked": None},
+                    "revoke": None,
+                    "prune": None,
+                },
+                "applications": {"pending": None, "approved": None, "rejected": None},
+                "approve": None,
+                "reject": None,
+                "backup": {"snapshot": None, "manual": None},
+                "say": None,
+                "eval": None,
+                "login": None,
+                "setup-admin": None,
+                "lock": None,
+                "logout": None,
+                "user": {"list": None, "add": None, "remove": None},
+                "clear": None,
+                "stop": None,
+                "exit": None,
+                "quit": None,
+            }
+        )
 
     def append_log(self, text: str) -> None:
         """Appends log text to the top pane and scrolls to bottom."""
@@ -245,9 +337,7 @@ class ConsoleService:
 
             logs_dir = Path("logs")
             logs_dir.mkdir(parents=True, exist_ok=True)
-            has_file_handler = any(
-                isinstance(h, RotatingFileHandler) for h in root_logger.handlers
-            )
+            has_file_handler = any(isinstance(h, RotatingFileHandler) for h in root_logger.handlers)
             if not has_file_handler:
                 file_handler = RotatingFileHandler(
                     logs_dir / "tarclub.log",
@@ -269,35 +359,14 @@ class ConsoleService:
         history_file.parent.mkdir(parents=True, exist_ok=True)
         history = FileHistory(str(history_file))
 
-        completer = NestedCompleter.from_nested_dict({
-            "help": None,
-            "?": None,
-            "status": None,
-            "guilds": None,
-            "societies": None,
-            "privacy": {"true": None, "false": None},
-            "token": {
-                "create": None,
-                "list": {"active": None, "used": None, "revoked": None},
-                "revoke": None,
-                "prune": None,
-            },
-            "applications": {"pending": None, "approved": None, "rejected": None},
-            "approve": None,
-            "reject": None,
-            "backup": {"snapshot": None, "manual": None},
-            "say": None,
-            "eval": None,
-            "clear": None,
-            "stop": None,
-            "exit": None,
-            "quit": None,
-        })
-
         initial_text = "\n".join(ConsoleAwareStreamHandler._log_buffer)
         if initial_text:
             initial_text += "\n"
-        banner = "🎮 TARClub Console initialized. Type 'help' for commands | 'exit' to quit.\n"
+        banner = (
+            "🎮 TARClub Console initialized.\n"
+            "🔒 Console is locked. Type 'login <username>' to authenticate "
+            "(or 'setup-admin <username>' if first time).\n"
+        )
         initial_text += banner
 
         self.log_area = TextArea(
@@ -309,22 +378,25 @@ class ConsoleService:
         )
         self.log_area.buffer.cursor_position = len(self.log_area.text)
 
-        style = Style.from_dict({
-            "text-area.prompt": "ansicyan bold",
-            "completion-menu": "bg:#1e1e2e #cdd6f4",
-            "completion-menu.completion": "bg:#1e1e2e #cdd6f4",
-            "completion-menu.completion.current": "bg:#45475a #89b4fa bold",
-            "scrollbar.background": "bg:#11111b",
-            "scrollbar.button": "bg:#585b70",
-        })
+        style = Style.from_dict(
+            {
+                "text-area.prompt": "ansicyan bold",
+                "completion-menu": "bg:#1e1e2e #cdd6f4",
+                "completion-menu.completion": "bg:#1e1e2e #cdd6f4",
+                "completion-menu.completion.current": "bg:#45475a #89b4fa bold",
+                "scrollbar.background": "bg:#11111b",
+                "scrollbar.button": "bg:#585b70",
+            }
+        )
 
         self.input_box = TextArea(
             height=1,
-            prompt="tarclub> ",
+            prompt=lambda: self._get_prompt(),
+            password=Condition(lambda: self._is_password_mode),
             multiline=False,
             wrap_lines=False,
             history=history,
-            completer=completer,
+            completer=DynamicCompleter(self._get_completer),
             accept_handler=self._on_accept,
         )
 
@@ -371,6 +443,13 @@ class ConsoleService:
 
         @kb.add("c-c")
         def _on_ctrl_c(event):
+            if self._is_password_mode:
+                self._is_password_mode = False
+                self._pending_auth_user = None
+                self.write_output("[AUTH CANCELLED] Password entry cancelled.")
+                if self.app:
+                    self.app.invalidate()
+                return
             if self.input_box and self.input_box.text:
                 self.input_box.text = ""
             else:
@@ -382,11 +461,13 @@ class ConsoleService:
             if self._loop and self._loop.is_running():
                 asyncio.create_task(self._cmd_stop())
 
-        body = HSplit([
-            self.log_area,
-            HorizontalLine(),
-            self.input_box,
-        ])
+        body = HSplit(
+            [
+                self.log_area,
+                HorizontalLine(),
+                self.input_box,
+            ]
+        )
 
         root = FloatContainer(
             content=body,
@@ -423,11 +504,26 @@ class ConsoleService:
             ConsoleAwareStreamHandler._console_instance = None
 
     def _on_accept(self, buff) -> bool:
-        cmd = buff.text.strip()
+        text = buff.text
         buff.text = ""
+
+        if self._is_password_mode:
+            self._is_password_mode = False
+            if not text:
+                self.write_output("[AUTH CANCELLED] Password entry cancelled.")
+                self._pending_auth_user = None
+                if self.app:
+                    self.app.invalidate()
+                return False
+            self.append_log(f"{self._get_prompt()}********")
+            if self._loop and self._loop.is_running():
+                asyncio.create_task(self._handle_password_input(text))
+            return False
+
+        cmd = text.strip()
         if cmd:
             logger.info("[CMD] Executed: %s", cmd)
-            self.append_log(f"tarclub> {cmd}")
+            self.append_log(f"{self._get_prompt()}{cmd}")
             if self._loop and self._loop.is_running():
                 asyncio.create_task(self.handle_command(cmd))
         return False
@@ -460,8 +556,36 @@ class ConsoleService:
         args = parts[1:]
 
         try:
+            # Commands unconditionally accessible when locked
             if cmd in ("help", "?"):
                 self._cmd_help()
+                return
+            elif cmd == "clear":
+                self._cmd_clear()
+                return
+            elif cmd in ("stop", "exit", "quit"):
+                await self._cmd_stop()
+                return
+            elif cmd == "setup-admin":
+                await self._cmd_setup_admin(args)
+                return
+            elif cmd == "login":
+                await self._cmd_login(args)
+                return
+
+            # Strict Authentication Gate - No bypass allowed
+            if not self.is_authenticated:
+                self.write_output(
+                    "🔒 [AUTH REQUIRED] Console is locked. Run 'login <username>' to authenticate "
+                    "(or 'setup-admin <username>' if initializing for the first time)."
+                )
+                return
+
+            # Authenticated commands
+            if cmd in ("lock", "logout"):
+                self._cmd_lock()
+            elif cmd == "user":
+                await self._cmd_user(args)
             elif cmd == "status":
                 await self._cmd_status()
             elif cmd == "guilds":
@@ -482,10 +606,6 @@ class ConsoleService:
                 await self._cmd_say(args)
             elif cmd == "eval":
                 await self._cmd_eval(args)
-            elif cmd == "clear":
-                self._cmd_clear()
-            elif cmd in ("stop", "exit", "quit"):
-                await self._cmd_stop()
             else:
                 self.write_output(f"[WARN] Unknown command '{cmd}'. Type 'help' for commands.")
         except Exception as e:
@@ -497,7 +617,309 @@ class ConsoleService:
     # ==========================================
 
     def _cmd_help(self) -> None:
-        self.write_output("\n".join(HELP_LINES))
+        status_line = (
+            f"  Status: 🔓 AUTHENTICATED ({self.authenticated_user})"
+            if self.is_authenticated
+            else "  Status: 🔒 LOCKED (Run 'login <username>' to authenticate)"
+        )
+        banner = [
+            HELP_LINES[0],
+            status_line,
+            "------------------------------------------------------------------------",
+        ]
+        self.write_output("\n".join(banner + HELP_LINES[1:]))
+
+    def _pam_authenticate(self, username: str, password: str) -> bool:
+        if pam is None:
+            logger.error("python-pam library not installed; authentication failing.")
+            return False
+        try:
+            p = pam.pam()
+            return bool(p.authenticate(username, password, service="login"))
+        except Exception as exc:
+            logger.warning("PAM authentication exception for %s: %s", username, exc)
+            return False
+
+    async def _handle_password_input(self, password: str) -> None:
+        username = self._pending_auth_user
+        action = self._pending_auth_action
+        self._pending_auth_user = None
+        self._pending_auth_action = "login"
+
+        if not username:
+            return
+
+        now = time.monotonic()
+        if now < self._locked_until:
+            rem = int(self._locked_until - now)
+            self.write_output(
+                f"🚨 [SECURITY LOCKOUT] Console is temporarily locked due to repeated failed "
+                f"attempts. Try again in {rem}s."
+            )
+            return
+
+        success = await asyncio.to_thread(self._pam_authenticate, username, password)
+
+        if success:
+            self._failed_attempts = 0
+            self.is_authenticated = True
+            self.authenticated_user = username
+
+            if action == "setup_admin":
+                await self.db.add_console_admin(username, role="admin", added_by="bootstrap")
+                self.write_output(
+                    f"🎉 [SECURITY] Root administrator '{username}' successfully initialized!"
+                )
+                await self._dispatch_security_alert(
+                    title="🛡️ Console Admin Initialized",
+                    description=(
+                        f"First console administrator **{username}** was initialized via bootstrap."
+                    ),
+                    color=0x2ECC71,
+                )
+
+            self.write_output(
+                f"🔓 [AUTH SUCCESS] Welcome, {username}! Console unlocked. "
+                "Type 'help' for commands."
+            )
+            if self.app:
+                self.app.invalidate()
+
+            await self._dispatch_security_alert(
+                title="🔐 Console Login Successful",
+                description=(
+                    f"Administrator **{username}** authenticated and unlocked backend "
+                    "terminal session."
+                ),
+                color=0x57F287,
+            )
+        else:
+            self._failed_attempts += 1
+            self.write_output(
+                f"❌ [AUTH FAILED] Invalid credentials for user '{username}'. "
+                f"Attempt {self._failed_attempts}/3."
+            )
+            if self._failed_attempts >= 3:
+                self._locked_until = time.monotonic() + 900  # 15 minutes
+                self.write_output(
+                    "🚨 [SECURITY LOCKOUT] 3 failed authentication attempts detected. "
+                    "Console locked for 15 minutes."
+                )
+                await self._dispatch_security_alert(
+                    title="🚨 Console Brute-Force Lockout",
+                    description=(
+                        f"**3 failed authentication attempts** detected for user **{username}**.\n"
+                        "Console locked for 15 minutes."
+                    ),
+                    color=0xED4245,
+                )
+
+    async def _cmd_setup_admin(self, args: list[str]) -> None:
+        if not args:
+            self.write_output("[WARN] Usage: setup-admin <username> [password]")
+            return
+
+        has_admin = await self.db.has_any_console_admin()
+        if has_admin:
+            self.write_output(
+                "🔒 [AUTH ERROR] An administrator account already exists. "
+                "Please login with an authorized account or ask an administrator to add you."
+            )
+            return
+
+        username = args[0].strip()
+        now = time.monotonic()
+        if now < self._locked_until:
+            rem = int(self._locked_until - now)
+            self.write_output(f"🚨 [SECURITY LOCKOUT] Console is locked. Try again in {rem}s.")
+            return
+
+        self._pending_auth_user = username
+        self._pending_auth_action = "setup_admin"
+
+        if len(args) >= 2:
+            await self._handle_password_input(args[1])
+            return
+
+        self._is_password_mode = True
+        self.write_output(
+            f"🔑 Initializing root admin '{username}'. Please enter system PAM password:"
+        )
+        if self.app:
+            self.app.invalidate()
+
+    async def _cmd_login(self, args: list[str]) -> None:
+        if self.is_authenticated:
+            self.write_output(
+                f"[INFO] Already logged in as '{self.authenticated_user}'. "
+                "Run 'lock' or 'logout' to switch users."
+            )
+            return
+
+        if not args:
+            self.write_output("[WARN] Usage: login <username> [password]")
+            return
+
+        username = args[0].strip()
+        now = time.monotonic()
+        if now < self._locked_until:
+            rem = int(self._locked_until - now)
+            self.write_output(f"🚨 [SECURITY LOCKOUT] Console is locked. Try again in {rem}s.")
+            return
+
+        has_admin = await self.db.has_any_console_admin()
+        if not has_admin:
+            self.write_output(
+                "🔒 [AUTH REQUIRED] No console administrators have been initialized yet."
+            )
+            self.write_output(
+                f"Run 'setup-admin {username}' to bootstrap this account as root administrator."
+            )
+            return
+
+        is_admin = await self.db.is_console_admin(username)
+        if not is_admin:
+            self.write_output(
+                f"❌ [AUTH ERROR] User '{username}' is not an authorized console administrator."
+            )
+            return
+
+        self._pending_auth_user = username
+        self._pending_auth_action = "login"
+
+        if len(args) >= 2:
+            await self._handle_password_input(args[1])
+            return
+
+        self._is_password_mode = True
+        self.write_output(f"🔑 Enter PAM password for '{username}':")
+        if self.app:
+            self.app.invalidate()
+
+    def _cmd_lock(self) -> None:
+        if not self.is_authenticated:
+            self.write_output("[INFO] Console is already locked.")
+            return
+        user = self.authenticated_user
+        self.is_authenticated = False
+        self.authenticated_user = None
+        self._is_password_mode = False
+        self._pending_auth_user = None
+        self.write_output(f"🔒 [CONSOLE] User '{user}' logged out. Console locked.")
+        if self.app:
+            self.app.invalidate()
+
+    async def _cmd_user(self, args: list[str]) -> None:
+        if not args:
+            self.write_output("[WARN] Usage: user <list|add|remove> [username]")
+            return
+
+        sub = args[0].lower()
+        if sub == "list":
+            admins = await self.db.get_console_admins()
+            if not admins:
+                self.write_output("No console administrators registered.")
+                return
+            self.write_output("================ Authorized Console Admins ================")
+            for a in admins:
+                added_by = a.get("added_by") or "system"
+                added_at = a.get("added_at") or "unknown"
+                role = a.get("role", "admin")
+                self.write_output(
+                    f" • {a['username']} (Role: {role}, Added by: {added_by}, Date: {added_at})"
+                )
+            self.write_output("===========================================================")
+        elif sub == "add":
+            if len(args) < 2:
+                self.write_output("[WARN] Usage: user add <username>")
+                return
+            target = args[1].strip()
+            if await self.db.is_console_admin(target):
+                self.write_output(
+                    f"[WARN] User '{target}' is already an authorized console administrator."
+                )
+                return
+            await self.db.add_console_admin(target, role="admin", added_by=self.authenticated_user)
+            self.write_output(f"✅ Added '{target}' as authorized console administrator.")
+            await self._dispatch_security_alert(
+                title="🛡️ Console Admin Added",
+                description=(
+                    f"Administrator **{self.authenticated_user}** added **{target}** as console "
+                    "admin."
+                ),
+                color=0x3498DB,
+            )
+        elif sub in ("remove", "delete", "del"):
+            if len(args) < 2:
+                self.write_output("[WARN] Usage: user remove <username>")
+                return
+            target = args[1].strip()
+            admins = await self.db.get_console_admins()
+            if len(admins) <= 1 and any(a["username"] == target for a in admins):
+                self.write_output(
+                    f"❌ Cannot remove '{target}': At least one console administrator must remain."
+                )
+                return
+            removed = await self.db.remove_console_admin(target)
+            if removed:
+                self.write_output(f"✅ Removed '{target}' from console administrators.")
+                await self._dispatch_security_alert(
+                    title="🛡️ Console Admin Removed",
+                    description=(
+                        f"Administrator **{self.authenticated_user}** removed **{target}** from "
+                        "console admins."
+                    ),
+                    color=0xE67E22,
+                )
+            else:
+                self.write_output(
+                    f"[WARN] User '{target}' was not found in console administrators."
+                )
+        else:
+            self.write_output(
+                f"[WARN] Unknown subcommand 'user {sub}'. Available: list, add, remove"
+            )
+
+    async def _dispatch_security_alert(self, title: str, description: str, color: int) -> None:
+        try:
+            embed = discord.Embed(
+                title=title,
+                description=description,
+                color=color,
+                timestamp=discord.utils.utcnow(),
+            )
+            host_info = f"{getpass.getuser()}@{socket.gethostname()}"
+            embed.add_field(name="Host", value=f"`{host_info}`", inline=True)
+            bot_tag = str(self.bot.user) if self.bot.user else "TARClub"
+            embed.set_footer(text=f"TARClub Console Security • {bot_tag}")
+
+            # Send to review_channel_id if configured
+            rev_chan_id = getattr(self.settings, "review_channel_id", None)
+            if rev_chan_id:
+                chan = self.bot.get_channel(rev_chan_id)
+                if not chan:
+                    try:
+                        chan = await self.bot.fetch_channel(rev_chan_id)
+                    except Exception as exc:
+                        logger.debug("Failed fetching review channel: %s", exc)
+                if chan and isinstance(chan, discord.TextChannel):
+                    try:
+                        await chan.send(embed=embed)
+                    except Exception as exc:
+                        logger.debug("Could not send alert to review channel: %s", exc)
+
+            # Send to connected guilds' system channels
+            for guild in self.bot.guilds:
+                chan = guild.system_channel
+                if chan and isinstance(chan, discord.TextChannel):
+                    perms = chan.permissions_for(guild.me)
+                    if perms.send_messages and perms.embed_links:
+                        try:
+                            await chan.send(embed=embed)
+                        except Exception as exc:
+                            logger.debug("Failed sending security alert to %s: %s", chan.id, exc)
+        except Exception as exc:
+            logger.debug("Security alert dispatch error: %s", exc)
 
     def _cmd_clear(self) -> None:
         if self.is_active and self.log_area:

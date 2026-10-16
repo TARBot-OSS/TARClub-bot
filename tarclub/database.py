@@ -172,6 +172,14 @@ class Database(DatabaseBase):
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 reviewed_at TIMESTAMP
             );
+
+            -- 9. Authorized console backend administrators
+            CREATE TABLE IF NOT EXISTS console_admins (
+                username TEXT PRIMARY KEY,
+                role TEXT NOT NULL DEFAULT 'admin',
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                added_by TEXT
+            );
             """
         )
         # Ensure is_private column exists in societies
@@ -721,3 +729,58 @@ class Database(DatabaseBase):
         )
         await self.conn.commit()
         return cursor.rowcount > 0
+
+    # =========================================================================
+    # 🔐 Console Backend Admin Accounts
+    # =========================================================================
+
+    async def get_console_admins(self) -> list[dict[str, Any]]:
+        """Returns all authorized console backend administrator usernames."""
+        cursor = await self.conn.execute(
+            "SELECT username, role, added_at, added_by FROM console_admins ORDER BY added_at ASC;"
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+    async def is_console_admin(self, username: str) -> bool:
+        """Checks if a username is in the authorized console administrators table."""
+        cursor = await self.conn.execute(
+            "SELECT 1 FROM console_admins WHERE LOWER(username) = LOWER(?);",
+            (username.strip(),),
+        )
+        return await cursor.fetchone() is not None
+
+    async def has_any_console_admin(self) -> bool:
+        """Returns True if at least one console administrator account exists."""
+        cursor = await self.conn.execute("SELECT 1 FROM console_admins LIMIT 1;")
+        return await cursor.fetchone() is not None
+
+    async def add_console_admin(
+        self, username: str, role: str = "admin", added_by: str | None = None
+    ) -> bool:
+        """Adds a username to the authorized console administrators table."""
+        try:
+            await self.conn.execute(
+                """INSERT INTO console_admins (username, role, added_by)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(username) DO UPDATE SET role = excluded.role;""",
+                (username.strip(), role, added_by),
+            )
+            await self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error("Failed to add console admin '%s': %s", username, e)
+            return False
+
+    async def remove_console_admin(self, username: str) -> bool:
+        """Removes a username from the authorized console administrators table."""
+        try:
+            cursor = await self.conn.execute(
+                "DELETE FROM console_admins WHERE LOWER(username) = LOWER(?);",
+                (username.strip(),),
+            )
+            await self.conn.commit()
+            return cursor.rowcount > 0
+        except Exception as e:
+            logger.error("Failed to remove console admin '%s': %s", username, e)
+            return False

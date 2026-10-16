@@ -114,6 +114,8 @@ async def test_console_commands(db: Database, mock_bot, tmp_path: Path):
     )
 
     console = ConsoleService(mock_bot, db, settings)
+    console.is_authenticated = True
+    console.authenticated_user = "admin"
 
     # 1. Help command
     captured = io.StringIO()
@@ -161,9 +163,21 @@ def test_console_completer_tarclub():
         # Empty line: matches top-level commands
         first = _console_completer("", 0)
         valid = (
-            "help", "status", "guilds", "societies", "privacy", "token",
-            "applications", "approve", "reject", "say", "eval", "clear",
-            "stop", "exit", "quit"
+            "help",
+            "status",
+            "guilds",
+            "societies",
+            "privacy",
+            "token",
+            "applications",
+            "approve",
+            "reject",
+            "say",
+            "eval",
+            "clear",
+            "stop",
+            "exit",
+            "quit",
         )
         assert first in valid
 
@@ -211,3 +225,156 @@ def test_console_escable_help_tarclub(mock_bot, tmp_path: Path):
     with patch("sys.stdout", captured), patch("sys.stdin.isatty", return_value=False):
         console._show_escable_help()
     assert "TARClub Console Commands" in captured.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_console_locked_gate(db: Database, mock_bot, tmp_path: Path):
+    settings = Settings(
+        discord_token="fake_token",
+        application_id=123456,
+        database_path=tmp_path / "test.db",
+        tarveri_bot_id=1542,
+        enable_tarveri_integration=False,
+        tarveri_db_path=None,
+        shared_secret="secret",
+        log_level="INFO",
+        environment="test",
+        enable_console=True,
+    )
+    console = ConsoleService(mock_bot, db, settings)
+    assert not console.is_authenticated
+
+    captured = io.StringIO()
+    with patch("sys.stdout", captured):
+        await console.handle_command("status")
+    assert "[AUTH REQUIRED]" in captured.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_console_setup_admin_and_login_flow(db: Database, mock_bot, tmp_path: Path):
+    settings = Settings(
+        discord_token="fake_token",
+        application_id=123456,
+        database_path=tmp_path / "test.db",
+        tarveri_bot_id=1542,
+        enable_tarveri_integration=False,
+        tarveri_db_path=None,
+        shared_secret="secret",
+        log_level="INFO",
+        environment="test",
+        enable_console=True,
+    )
+    console = ConsoleService(mock_bot, db, settings)
+
+    # 1. Login before any admin exists
+    captured = io.StringIO()
+    with patch("sys.stdout", captured):
+        await console.handle_command("login rootadmin")
+    assert "No console administrators have been initialized yet" in captured.getvalue()
+
+    # 2. Setup admin with correct PAM auth (mocked)
+    with patch.object(console, "_pam_authenticate", return_value=True):
+        captured = io.StringIO()
+        with patch("sys.stdout", captured):
+            await console.handle_command("setup-admin rootadmin secretpassword")
+        assert "Root administrator 'rootadmin' successfully initialized" in captured.getvalue()
+        assert console.is_authenticated
+        assert console.authenticated_user == "rootadmin"
+
+    # 3. Subsequent setup-admin is blocked
+    captured = io.StringIO()
+    with patch("sys.stdout", captured):
+        await console.handle_command("setup-admin secondadmin secretpassword")
+    assert "An administrator account already exists" in captured.getvalue()
+
+    # 4. Lock / Logout
+    captured = io.StringIO()
+    with patch("sys.stdout", captured):
+        await console.handle_command("lock")
+    assert not console.is_authenticated
+    assert "Console locked" in captured.getvalue()
+
+    # 5. Login unauthorized user
+    captured = io.StringIO()
+    with patch("sys.stdout", captured):
+        await console.handle_command("login fakeuser")
+    assert "is not an authorized console administrator" in captured.getvalue()
+
+    # 6. Login authorized user with PAM failure -> increments failure count
+    with patch.object(console, "_pam_authenticate", return_value=False):
+        captured = io.StringIO()
+        with patch("sys.stdout", captured):
+            await console.handle_command("login rootadmin wrongpass1")
+        assert "Attempt 1/3" in captured.getvalue()
+        assert not console.is_authenticated
+
+        captured = io.StringIO()
+        with patch("sys.stdout", captured):
+            await console.handle_command("login rootadmin wrongpass2")
+        assert "Attempt 2/3" in captured.getvalue()
+
+        # 3rd failed attempt triggers lockout
+        captured = io.StringIO()
+        with patch("sys.stdout", captured):
+            await console.handle_command("login rootadmin wrongpass3")
+        assert "Console locked for 15 minutes" in captured.getvalue()
+        assert console._locked_until > 0
+
+        # Attempting while locked out
+        captured = io.StringIO()
+        with patch("sys.stdout", captured):
+            await console.handle_command("login rootadmin wrongpass4")
+        assert "[SECURITY LOCKOUT]" in captured.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_console_user_management(db: Database, mock_bot, tmp_path: Path):
+    settings = Settings(
+        discord_token="fake_token",
+        application_id=123456,
+        database_path=tmp_path / "test.db",
+        tarveri_bot_id=1542,
+        enable_tarveri_integration=False,
+        tarveri_db_path=None,
+        shared_secret="secret",
+        log_level="INFO",
+        environment="test",
+        enable_console=True,
+    )
+    console = ConsoleService(mock_bot, db, settings)
+    console.is_authenticated = True
+    console.authenticated_user = "admin"
+    await db.add_console_admin("admin", role="admin", added_by="bootstrap")
+
+    # 1. User list
+    captured = io.StringIO()
+    with patch("sys.stdout", captured):
+        await console.handle_command("user list")
+    assert "admin" in captured.getvalue()
+
+    # 2. User add
+    captured = io.StringIO()
+    with patch("sys.stdout", captured):
+        await console.handle_command("user add operator2")
+    assert "Added 'operator2' as authorized console administrator" in captured.getvalue()
+    assert await db.is_console_admin("operator2")
+
+    # 3. Prevent duplicate add
+    captured = io.StringIO()
+    with patch("sys.stdout", captured):
+        await console.handle_command("user add operator2")
+    assert "already an authorized console administrator" in captured.getvalue()
+
+    # 4. User remove
+    captured = io.StringIO()
+    with patch("sys.stdout", captured):
+        await console.handle_command("user remove operator2")
+    assert "Removed 'operator2' from console administrators" in captured.getvalue()
+    assert not await db.is_console_admin("operator2")
+
+    # 5. Cannot remove last remaining admin
+    captured = io.StringIO()
+    with patch("sys.stdout", captured):
+        await console.handle_command("user remove admin")
+    assert "At least one console administrator must remain" in captured.getvalue()
+    assert await db.is_console_admin("admin")
