@@ -437,3 +437,38 @@ class Database(DatabaseBase):
         )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
+
+    async def get_integration(self, guild_id: int) -> dict[str, Any] | None:
+        """Fetch TARVeri cross-bot integration state for a guild."""
+        cursor = await self.conn.execute(
+            "SELECT * FROM tarveri_integrations WHERE guild_id = ?;",
+            (guild_id,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def set_integration(
+        self,
+        guild_id: int,
+        is_linked: bool,
+        enforce_student: bool = True,
+        shared_secret_hash: str | None = None,
+    ) -> None:
+        """Update or insert integration status for a guild."""
+        await self.conn.execute(
+            """
+            INSERT INTO tarveri_integrations (
+                guild_id, is_linked, paired_at, shared_secret_hash, enforce_student_verification
+            ) VALUES (?, ?, CURRENT_TIMESTAMP, ?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET
+                is_linked = excluded.is_linked,
+                paired_at = CURRENT_TIMESTAMP,
+                shared_secret_hash = coalesce(
+                    excluded.shared_secret_hash,
+                    tarveri_integrations.shared_secret_hash
+                ),
+                enforce_student_verification = excluded.enforce_student_verification;
+            """,
+            (guild_id, 1 if is_linked else 0, shared_secret_hash, 1 if enforce_student else 0),
+        )
+        await self.conn.commit()

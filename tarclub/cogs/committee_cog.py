@@ -12,6 +12,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from tarclub.database import Database
+from tarclub.services.integration_service import IntegrationService
 from tarclub.services.rbac_service import SocietyPermission, has_permission
 
 if TYPE_CHECKING:
@@ -179,20 +180,39 @@ class CommitteeCog(commands.GroupCog, group_name="committee"):
             )
             return
 
+        # Check TARVeri student verification gating
+        integration = await self.db.get_integration(interaction.guild_id)
+        enforce_gating = (
+            bool(integration.get("enforce_student_verification", 1)) if integration else True
+        )
+        is_verified, role_label = IntegrationService.verify_member_student_status(member)
+
+        if enforce_gating and not is_verified:
+            # Check if caller has bypass permission
+            user_mask = await self.db.get_user_permissions(society["id"], interaction.user.id)
+            has_bypass = has_permission(user_mask, SocietyPermission.BYPASS_STUDENT_GATE)
+            is_owner = interaction.user.id == interaction.guild.owner_id
+            if not has_bypass and not is_owner:
+                await interaction.followup.send(
+                    f"❌ Cannot appoint {member.mention}: Committee members must be "
+                    "verified active TAR UMT students through TARVeri.",
+                    ephemeral=True,
+                )
+                return
+
         # Appoint in database
         await self.db.assign_committee_member(
             term_id=active_term["id"],
             position_id=target_pos["id"],
             user_id=member.id,
-            is_verified=False,
+            is_verified=is_verified,
         )
 
         active_label = active_term["term_name"]
         soc_pos_title = target_pos["title"]
-        await interaction.followup.send(
-            f"✅ Appointed {member.mention} as **{soc_pos_title}** (`{active_label}`).",
-            ephemeral=False,
-        )
+        v_tag = " `[Verified Student]`" if is_verified else ""
+        msg = f"✅ Appointed {member.mention} as **{soc_pos_title}** (`{active_label}`){v_tag}."
+        await interaction.followup.send(msg, ephemeral=False)
 
     @app_commands.command(name="relieve", description="Relieve a member from a committee position.")
     @app_commands.describe(
