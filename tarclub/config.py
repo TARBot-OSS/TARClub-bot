@@ -20,6 +20,7 @@ class Settings:
     database_path: Path
     tarveri_bot_id: int
     enable_tarveri_integration: bool
+    tarveri_db_path: Path | None
     shared_secret: str
     log_level: str
     environment: str
@@ -46,12 +47,16 @@ class Settings:
             "yes",
         )
 
+        tarveri_db_raw = os.getenv("TARCLUB_TARVERI_DB_PATH", "").strip()
+        tarveri_db_path = Path(tarveri_db_raw) if tarveri_db_raw else None
+
         return cls(
             discord_token=token,
             application_id=application_id,
             database_path=db_path,
             tarveri_bot_id=tarveri_bot_id,
             enable_tarveri_integration=enable_integration,
+            tarveri_db_path=tarveri_db_path,
             shared_secret=os.getenv("TARCLUB_SHARED_SECRET", ""),
             log_level=os.getenv("TARCLUB_LOG_LEVEL", "INFO").upper(),
             environment=os.getenv("TARCLUB_ENVIRONMENT", "development").lower(),

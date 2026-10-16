@@ -185,7 +185,11 @@ class CommitteeCog(commands.GroupCog, group_name="committee"):
         enforce_gating = (
             bool(integration.get("enforce_student_verification", 1)) if integration else True
         )
-        is_verified, role_label = IntegrationService.verify_member_student_status(member)
+        settings = getattr(self.bot, "settings", None)
+        tarveri_db = getattr(settings, "tarveri_db_path", None)
+        is_verified, role_label = IntegrationService.verify_member_student_status(
+            member, tarveri_db_path=tarveri_db
+        )
 
         if enforce_gating and not is_verified:
             # Check if caller has bypass permission

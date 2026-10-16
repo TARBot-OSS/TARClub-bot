@@ -89,6 +89,140 @@ class IntegrationCog(commands.GroupCog, group_name="integrate-tarveri"):
             ephemeral=False,
         )
 
+    @app_commands.command(
+        name="link",
+        description="Link TARClub to TARVeri using a token from TARVeri /society_bridge pair.",
+    )
+    @app_commands.describe(token="Pairing token provided by TARVeri administrator")
+    @app_commands.default_permissions(administrator=True)
+    async def link(self, interaction: discord.Interaction, token: str) -> None:
+        if interaction.guild is None:
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        import hashlib
+
+        valid, message = IntegrationService.validate_pairing_token(token, interaction.guild.id)
+        if not valid:
+            await interaction.followup.send(
+                f"❌ **Pairing Token Rejected:** {message}",
+                ephemeral=True,
+            )
+            return
+
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        await self.db.set_integration(
+            guild_id=interaction.guild_id,
+            is_linked=True,
+            enforce_student=True,
+            shared_secret_hash=token_hash,
+        )
+
+        embed = discord.Embed(
+            title="🔗 TARVeri Bridge Successfully Linked",
+            description=(
+                f"Society server **{interaction.guild.name}** is now paired with TARVeri!\n\n"
+                "• **Cross-Bot Gating:** Committee appointments enforce student status.\n"
+                "• **Auto-Audit:** Run `/integrate-tarveri audit` anytime to review health."
+            ),
+            color=0x00E676,
+        )
+        embed.set_footer(text="TARVeri & TARClub Cross-Bot Integration • TARBot-OSS")
+        await interaction.followup.send(embed=embed, ephemeral=False)
+
+    @app_commands.command(
+        name="audit",
+        description="Audit all active committee members against TARVeri verification status.",
+    )
+    @app_commands.default_permissions(administrator=True)
+    async def audit(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            return
+
+        await interaction.response.defer(ephemeral=False)
+        society = await self.db.get_society(interaction.guild_id)
+        if not society:
+            await interaction.followup.send(
+                "❌ This society is not registered yet. Run `/society register` first.",
+                ephemeral=True,
+            )
+            return
+
+        roster = await self.db.get_active_roster(society["id"])
+        if not roster:
+            await interaction.followup.send(
+                "ℹ️ No active committee positions found to audit.",
+                ephemeral=True,
+            )
+            return
+
+        total_positions = len(roster)
+        filled_count = 0
+        verified_count = 0
+        unverified_count = 0
+        missing_count = 0
+
+        breakdown_lines: list[str] = []
+
+        for item in roster:
+            user_id = item.get("user_id")
+            title = item.get("title", "Position")
+            if not user_id:
+                breakdown_lines.append(f"⚪ **{title}**: *Vacant*")
+                continue
+
+            filled_count += 1
+            member = interaction.guild.get_member(user_id)
+            if member is None:
+                missing_count += 1
+                breakdown_lines.append(
+                    f"⚠️ **{title}**: <@{user_id}> (*Member not found in Discord server*)"
+                )
+                continue
+
+            is_verified, role_or_fac = IntegrationService.verify_member_student_status(
+                member,
+                tarveri_db_path=self.settings.tarveri_db_path,
+            )
+            if is_verified:
+                verified_count += 1
+                breakdown_lines.append(f"🟢 **{title}**: {member.mention} — `{role_or_fac}`")
+            else:
+                unverified_count += 1
+                breakdown_lines.append(f"🔴 **{title}**: {member.mention} — **Unverified Student**")
+
+        status_color = 0x00E676 if unverified_count == 0 and missing_count == 0 else 0xFF9800
+        warn_count = unverified_count + missing_count
+        embed = discord.Embed(
+            title=f"📋 TARVeri Student Verification Audit — {society['name']}",
+            description=(
+                f"**Total Positions:** {total_positions} | **Filled:** {filled_count}\n"
+                f"**Verified Students:** 🟢 {verified_count} | **Warnings:** 🔴 {warn_count}"
+            ),
+            color=status_color,
+        )
+
+        chunk = ""
+        field_num = 1
+        for line in breakdown_lines:
+            if len(chunk) + len(line) + 1 > 1000:
+                embed.add_field(name=f"Roster Audit (Part {field_num})", value=chunk, inline=False)
+                chunk = line + "\n"
+                field_num += 1
+            else:
+                chunk += line + "\n"
+        if chunk:
+            embed.add_field(
+                name="Roster Verification Status"
+                if field_num == 1
+                else f"Roster Audit (Part {field_num})",
+                value=chunk,
+                inline=False,
+            )
+
+        embed.set_footer(text="TARVeri & TARClub Cross-Bot Integration • TARBot-OSS")
+        await interaction.followup.send(embed=embed)
+
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member) -> None:
         """Auto-detect TARVeri bot joining the server and activate the bridge."""

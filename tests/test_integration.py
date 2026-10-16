@@ -77,3 +77,89 @@ async def test_integration_db_persistence(db: Database):
     unlocked_state = await db.get_integration(guild_id)
     assert unlocked_state is not None
     assert unlocked_state["enforce_student_verification"] == 0
+
+
+def test_pairing_token_validation():
+    import base64
+    import time
+
+    guild_id = 1234567890
+    now = int(time.time())
+    valid_payload = f"tarveri-bridge:v1:{guild_id}:{now}:abcdef123456"
+    valid_token = base64.urlsafe_b64encode(valid_payload.encode("utf-8")).decode("utf-8")
+
+    ok, msg = IntegrationService.validate_pairing_token(valid_token, guild_id)
+    assert ok is True
+    assert "successfully" in msg
+
+    # Mismatched guild
+    ok, err = IntegrationService.validate_pairing_token(valid_token, 9999999999)
+    assert ok is False
+    assert "not this server" in err
+
+    # Expired token
+    old_payload = f"tarveri-bridge:v1:{guild_id}:{now - 100000}:abcdef123456"
+    old_token = base64.urlsafe_b64encode(old_payload.encode("utf-8")).decode("utf-8")
+    ok, err = IntegrationService.validate_pairing_token(old_token, guild_id)
+    assert ok is False
+    assert "expired" in err
+
+    # Invalid token format
+    ok, err = IntegrationService.validate_pairing_token("not-a-valid-token", guild_id)
+    assert ok is False
+
+
+def test_co_located_tarveri_student_query(tmp_path: Path):
+    import sqlite3
+
+    tarveri_db = tmp_path / "tarveri_mock.db"
+    with sqlite3.connect(tarveri_db) as conn:
+        conn.execute(
+            """
+            CREATE TABLE verifications (
+                discord_user_id INTEGER PRIMARY KEY,
+                student_id_hash TEXT UNIQUE NOT NULL,
+                faculty_code TEXT NOT NULL,
+                campus_code TEXT,
+                level_code TEXT,
+                programme_code TEXT,
+                is_alumni INTEGER DEFAULT 0,
+                card_expiry_date TEXT,
+                verified_at TEXT NOT NULL
+            );
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO verifications (
+                discord_user_id, student_id_hash, faculty_code, campus_code, verified_at
+            ) VALUES (11223344, 'hash123', 'FOCS', 'W', '2026-10-16 20:00:00');
+            """
+        )
+        conn.commit()
+
+    # Query existing user
+    res = IntegrationService.query_co_located_tarveri_student(tarveri_db, 11223344)
+    assert res is not None
+    assert res["faculty_code"] == "FOCS"
+    assert res["campus_code"] == "W"
+
+    # Query non-existing user
+    none_res = IntegrationService.query_co_located_tarveri_student(tarveri_db, 99999999)
+    assert none_res is None
+
+    # Query with missing db file
+    missing_res = IntegrationService.query_co_located_tarveri_student(
+        tmp_path / "missing.db", 11223344
+    )
+    assert missing_res is None
+
+    # Test member status via co-located DB fallback
+    member_mock = MagicMock()
+    member_mock.id = 11223344
+    member_mock.roles = []  # No discord roles
+    is_v, label = IntegrationService.verify_member_student_status(
+        member_mock, tarveri_db_path=tarveri_db
+    )
+    assert is_v is True
+    assert "FOCS" in str(label)
