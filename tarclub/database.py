@@ -62,6 +62,7 @@ class Database(DatabaseBase):
                 name TEXT NOT NULL,
                 faculty TEXT NOT NULL,
                 category TEXT NOT NULL DEFAULT 'ACADEMIC',
+                is_private BOOLEAN DEFAULT 0,
                 description TEXT,
                 founded_year INTEGER,
                 registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -134,6 +135,14 @@ class Database(DatabaseBase):
             );
             """
         )
+        # Ensure is_private column exists in societies
+        cursor = await self.conn.execute("PRAGMA table_info(societies);")
+        existing_soc_cols = {row[1] for row in await cursor.fetchall()}
+        if "is_private" not in existing_soc_cols:
+            await self.conn.execute(
+                "ALTER TABLE societies ADD COLUMN is_private BOOLEAN DEFAULT 0;"
+            )
+
         # Ensure template positions include General Member for any existing societies
         cursor = await self.conn.execute("SELECT id FROM societies;")
         soc_rows = await cursor.fetchall()
@@ -163,15 +172,22 @@ class Database(DatabaseBase):
         name: str,
         faculty: str,
         initial_term: str = "2025/2026",
+        is_private: bool = False,
     ) -> int:
-        """Register a new society, provision its initial theme, term, and 14-role template."""
+        """Register a new society, provision its initial theme, term, and 15-role template."""
         cursor = await self.conn.execute(
             """
-            INSERT INTO societies (guild_id, society_code, name, faculty)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO societies (guild_id, society_code, name, faculty, is_private)
+            VALUES (?, ?, ?, ?, ?)
             RETURNING id;
             """,
-            (guild_id, society_code.upper().strip(), name.strip(), faculty.upper().strip()),
+            (
+                guild_id,
+                society_code.upper().strip(),
+                name.strip(),
+                faculty.upper().strip(),
+                1 if is_private else 0,
+            ),
         )
         row = await cursor.fetchone()
         society_id = row[0]
@@ -498,3 +514,26 @@ class Database(DatabaseBase):
             (guild_id, 1 if is_linked else 0, shared_secret_hash, 1 if enforce_student else 0),
         )
         await self.conn.commit()
+
+    async def set_society_privacy(self, guild_id: int, is_private: bool) -> bool:
+        """Toggle public/private visibility status of a society."""
+        cursor = await self.conn.execute(
+            "UPDATE societies SET is_private = ? WHERE guild_id = ?;",
+            (1 if is_private else 0, guild_id),
+        )
+        await self.conn.commit()
+        return cursor.rowcount > 0
+
+    async def list_public_societies(self) -> list[dict[str, Any]]:
+        """Fetch all public societies for directory discovery."""
+        cursor = await self.conn.execute(
+            """
+            SELECT s.*, t.primary_color, t.emoji_badge
+            FROM societies s
+            LEFT JOIN society_themes t ON s.id = t.society_id
+            WHERE s.is_private = 0
+            ORDER BY s.faculty ASC, s.name ASC;
+            """
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]

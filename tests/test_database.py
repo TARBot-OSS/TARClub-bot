@@ -56,3 +56,40 @@ async def test_register_society_provisions_15_roles(test_db: Database):
     assert term is not None
     assert term["term_name"] == "Term 2025/2026"
     assert term["is_active"] == 1
+
+
+@pytest.mark.asyncio
+async def test_society_privacy_and_public_directory(test_db: Database):
+    # 1. Register Public Society
+    pub_id = await test_db.register_society(
+        guild_id=1001,
+        society_code="TARUMT-PUB",
+        name="Public Debate Society",
+        faculty="FSSH",
+        is_private=False,
+    )
+    assert pub_id > 0
+
+    # 2. Register Private Society
+    priv_id = await test_db.register_society(
+        guild_id=1002,
+        society_code="TARUMT-PRIV",
+        name="Private Leadership Honor Society",
+        faculty="ALL",
+        is_private=True,
+    )
+    assert priv_id > 0
+
+    # 3. Check public directory listing (should contain pub, but NOT priv)
+    public_list = await test_db.list_public_societies()
+    codes = [s["society_code"] for s in public_list]
+    assert "TARUMT-PUB" in codes
+    assert "TARUMT-PRIV" not in codes
+
+    # 4. Toggle private society to public
+    updated = await test_db.set_society_privacy(guild_id=1002, is_private=False)
+    assert updated is True
+
+    public_list_after = await test_db.list_public_societies()
+    codes_after = [s["society_code"] for s in public_list_after]
+    assert "TARUMT-PRIV" in codes_after

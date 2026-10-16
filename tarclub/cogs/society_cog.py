@@ -32,6 +32,7 @@ class SocietyCog(commands.GroupCog, group_name="society"):
         name="Full Society Name (e.g. Computer Science Society)",
         faculty="Associated Faculty (e.g. FOCS, FOET, FAFB, FCC, CPUS, or ALL)",
         term="Initial Academic Term Year (e.g. 2025/2026)",
+        is_private="True for private/internal society, False for public directory (default)",
     )
     @app_commands.default_permissions(administrator=True)
     async def register(
@@ -41,6 +42,7 @@ class SocietyCog(commands.GroupCog, group_name="society"):
         name: str,
         faculty: str,
         term: str = "2025/2026",
+        is_private: bool = False,
     ) -> None:
         if interaction.guild is None:
             await interaction.response.send_message(
@@ -68,6 +70,7 @@ class SocietyCog(commands.GroupCog, group_name="society"):
                 name=name,
                 faculty=faculty,
                 initial_term=term,
+                is_private=is_private,
             )
         except Exception as e:
             logger.exception("Failed to register society for guild %s", interaction.guild_id)
@@ -75,16 +78,18 @@ class SocietyCog(commands.GroupCog, group_name="society"):
             return
 
         positions = await self.db.get_positions(society_id)
+        vis_label = "🔒 **Private / Internal**" if is_private else "🌐 **Public Directory**"
 
         embed = discord.Embed(
             title=f"🏛️ Society Registered: {name}",
             description=(
                 f"**Code:** `{code.upper()}`\n"
                 f"**Faculty:** `{faculty.upper()}`\n"
+                f"**Visibility:** {vis_label}\n"
                 f"**Active Term:** `Term {term}`\n\n"
-                f"✅ **14 Standard Positions Provisioned!**\n"
+                f"✅ **15 Standard Positions Provisioned!**\n"
                 f"• Top Hierarchies: {', '.join([p['title'] for p in positions[:4]])}\n"
-                f"• Directorships: {', '.join([p['title'] for p in positions[8:12]])}...\n\n"
+                f"• General Membership: `{positions[-1]['title']}`\n\n"
                 "💡 **Next Steps:**\n"
                 "1. Assign members: `/committee assign`\n"
                 "2. Customize roles: `/committee edit-position`\n"
@@ -94,6 +99,71 @@ class SocietyCog(commands.GroupCog, group_name="society"):
         )
         embed.set_footer(text="TARClub Society Management • TAR UMT")
         await interaction.followup.send(embed=embed, ephemeral=False)
+
+    @app_commands.command(
+        name="set-privacy",
+        description="Toggle whether this society is listed publicly in the directory.",
+    )
+    @app_commands.describe(is_private="True to make private/hidden, False for public directory")
+    @app_commands.default_permissions(administrator=True)
+    async def set_privacy(self, interaction: discord.Interaction, is_private: bool) -> None:
+        if interaction.guild is None:
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        society = await self.db.get_society(interaction.guild_id)
+        if not society:
+            await interaction.followup.send("❌ Society not registered.", ephemeral=True)
+            return
+
+        await self.db.set_society_privacy(interaction.guild_id, is_private)
+        mode_text = (
+            "🔒 **PRIVATE** (Hidden from public directory)"
+            if is_private
+            else "🌐 **PUBLIC** (Discoverable in directory)"
+        )
+        await interaction.followup.send(
+            f"✅ Society visibility updated to {mode_text}.",
+            ephemeral=False,
+        )
+
+    @app_commands.command(
+        name="directory",
+        description="Browse the public directory of registered TAR UMT societies.",
+    )
+    async def directory(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=False)
+        societies = await self.db.list_public_societies()
+
+        if not societies:
+            await interaction.followup.send(
+                "ℹ️ No public societies are currently listed in the directory.",
+                ephemeral=True,
+            )
+            return
+
+        embed = discord.Embed(
+            title="🏛️ TAR UMT Public Societies Directory",
+            description=f"Showing **{len(societies)}** public societies & clubs across TAR UMT:\n",
+            color=0x1E88E5,
+        )
+
+        faculties: dict[str, list[str]] = {}
+        for s in societies:
+            fac = s.get("faculty", "GENERAL").upper()
+            badge = s.get("emoji_badge") or "🏛️"
+            entry = f"• {badge} **{s['name']}** (`{s['society_code']}`)"
+            faculties.setdefault(fac, []).append(entry)
+
+        for fac_name, entries in faculties.items():
+            embed.add_field(
+                name=f"Faculty / Group: {fac_name}",
+                value="\n".join(entries),
+                inline=False,
+            )
+
+        embed.set_footer(text="TARClub Multi-Tenant Society Engine • TARBot-OSS")
+        await interaction.followup.send(embed=embed)
 
     @app_commands.command(
         name="info",
@@ -115,6 +185,7 @@ class SocietyCog(commands.GroupCog, group_name="society"):
 
         active_term = await self.db.get_active_term(society["id"])
         term_name = active_term["term_name"] if active_term else "No Active Term"
+        vis_badge = "🔒 Private" if society.get("is_private") else "🌐 Public"
 
         # Parse primary color
         color_val = 0x1E88E5
@@ -128,6 +199,7 @@ class SocietyCog(commands.GroupCog, group_name="society"):
             description=(
                 f"**Society Code:** `{society['society_code']}`\n"
                 f"**Faculty:** `{society['faculty']}`\n"
+                f"**Visibility:** `{vis_badge}`\n"
                 f"**Current Term:** `{term_name}`\n"
                 f"**Brand Color:** `{society['primary_color']}`"
             ),
