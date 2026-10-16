@@ -11,6 +11,7 @@ from discord.ext import commands
 
 from tarclub.config import Settings
 from tarclub.database import Database
+from tarclub.services.console_service import ConsoleService
 
 logger = logging.getLogger("tarclub")
 
@@ -31,6 +32,7 @@ class TARClubBot(commands.Bot):
         )
         self.settings = settings
         self.db = db
+        self.console_service = ConsoleService(self, self.db, self.settings)
 
     async def setup_hook(self) -> None:
         """Initialize database, register persistent views, and load cogs."""
@@ -55,9 +57,13 @@ class TARClubBot(commands.Bot):
             self.user.id if self.user else "Unknown",
             len(self.guilds),
         )
+        if self.console_service:
+            self.console_service.start()
 
     async def close(self) -> None:
         """Gracefully close database and bot session."""
+        if getattr(self, "console_service", None):
+            self.console_service.stop()
         await self.db.close()
         await super().close()
         logger.info("TARClub process shut down cleanly.")

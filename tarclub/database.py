@@ -5,6 +5,8 @@ TARClub Database façade coordinating domain schemas and repository mixins.
 from __future__ import annotations
 
 import logging
+import secrets
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from tarclub.db.base import DatabaseBase
@@ -132,6 +134,43 @@ class Database(DatabaseBase):
                 paired_at TIMESTAMP,
                 shared_secret_hash TEXT,
                 enforce_student_verification BOOLEAN DEFAULT 1
+            );
+
+            -- 7. One-Time Society Registration Tokens (Console generated)
+            CREATE TABLE IF NOT EXISTS society_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token TEXT UNIQUE NOT NULL,
+                society_code TEXT NOT NULL,
+                name TEXT NOT NULL,
+                faculty TEXT NOT NULL DEFAULT 'ALL',
+                is_private BOOLEAN DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP,
+                used_at TIMESTAMP,
+                used_by_guild_id INTEGER,
+                used_by_user_id INTEGER,
+                status TEXT DEFAULT 'ACTIVE'
+            );
+
+            -- 8. Society Registration Applications
+            CREATE TABLE IF NOT EXISTS society_applications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                guild_name TEXT NOT NULL,
+                applicant_id INTEGER NOT NULL,
+                applicant_name TEXT NOT NULL,
+                society_code TEXT NOT NULL,
+                name TEXT NOT NULL,
+                faculty TEXT NOT NULL DEFAULT 'ALL',
+                description TEXT,
+                is_private BOOLEAN DEFAULT 0,
+                status TEXT DEFAULT 'PENDING',
+                review_channel_id INTEGER,
+                review_message_id INTEGER,
+                reviewed_by INTEGER,
+                review_reason TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                reviewed_at TIMESTAMP
             );
             """
         )
@@ -537,3 +576,148 @@ class Database(DatabaseBase):
         )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
+
+    # ==========================================
+    # 🎟️ One-Time Tokens & Applications
+    # ==========================================
+
+    async def create_society_token(
+        self,
+        society_code: str,
+        name: str,
+        faculty: str = "ALL",
+        is_private: bool = False,
+        days_valid: int = 30,
+    ) -> str:
+        """Generates a secure, human-readable registration token (e.g. TC-4F8A-9C12)."""
+        random_hex = secrets.token_hex(4).upper()
+        token = f"TC-{random_hex[:4]}-{random_hex[4:]}"
+        expires_at = (datetime.now(UTC) + timedelta(days=days_valid)).strftime("%Y-%m-%d %H:%M:%S")
+        await self.conn.execute(
+            """
+            INSERT INTO society_tokens (token, society_code, name, faculty, is_private, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?);
+            """,
+            (
+                token,
+                society_code.upper(),
+                name,
+                faculty.upper(),
+                1 if is_private else 0,
+                expires_at,
+            ),
+        )
+        await self.conn.commit()
+        return token
+
+    async def get_society_token(self, token: str) -> dict[str, Any] | None:
+        """Retrieves details of a registration token."""
+        cursor = await self.conn.execute(
+            "SELECT * FROM society_tokens WHERE token = ?;", (token.strip().upper(),)
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def redeem_society_token(self, token: str, guild_id: int, user_id: int) -> bool:
+        """Marks a token as redeemed by a specific guild and user."""
+        cursor = await self.conn.execute(
+            """
+            UPDATE society_tokens
+            SET status = 'USED', used_at = CURRENT_TIMESTAMP,
+                used_by_guild_id = ?, used_by_user_id = ?
+            WHERE token = ? AND status = 'ACTIVE';
+            """,
+            (guild_id, user_id, token.strip().upper()),
+        )
+        await self.conn.commit()
+        return cursor.rowcount > 0
+
+    async def revoke_society_token(self, token: str) -> bool:
+        """Revokes an unused token."""
+        cursor = await self.conn.execute(
+            "UPDATE society_tokens SET status = 'REVOKED' WHERE token = ? AND status = 'ACTIVE';",
+            (token.strip().upper(),),
+        )
+        await self.conn.commit()
+        return cursor.rowcount > 0
+
+    async def list_society_tokens(self, status: str | None = None) -> list[dict[str, Any]]:
+        """Lists tokens, optionally filtered by status."""
+        if status:
+            cursor = await self.conn.execute(
+                "SELECT * FROM society_tokens WHERE status = ? ORDER BY id DESC;",
+                (status.upper(),),
+            )
+        else:
+            cursor = await self.conn.execute(
+                "SELECT * FROM society_tokens ORDER BY id DESC LIMIT 50;"
+            )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+    async def create_society_application(
+        self,
+        guild_id: int,
+        guild_name: str,
+        applicant_id: int,
+        applicant_name: str,
+        society_code: str,
+        name: str,
+        faculty: str = "ALL",
+        description: str = "",
+        is_private: bool = False,
+    ) -> int:
+        """Creates a pending society registration application."""
+        cursor = await self.conn.execute(
+            """
+            INSERT INTO society_applications (
+                guild_id, guild_name, applicant_id, applicant_name,
+                society_code, name, faculty, description, is_private, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING');
+            """,
+            (
+                guild_id,
+                guild_name,
+                applicant_id,
+                applicant_name,
+                society_code.upper(),
+                name,
+                faculty.upper(),
+                description,
+                1 if is_private else 0,
+            ),
+        )
+        await self.conn.commit()
+        return cursor.lastrowid
+
+    async def get_society_application(self, app_id: int) -> dict[str, Any] | None:
+        """Retrieves a single application by ID."""
+        cursor = await self.conn.execute(
+            "SELECT * FROM society_applications WHERE id = ?;", (app_id,)
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def list_society_applications(self, status: str = "PENDING") -> list[dict[str, Any]]:
+        """Lists applications by status."""
+        cursor = await self.conn.execute(
+            "SELECT * FROM society_applications WHERE status = ? ORDER BY id ASC;",
+            (status.upper(),),
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+    async def resolve_society_application(
+        self, app_id: int, status: str, reviewer_id: int, reason: str = ""
+    ) -> bool:
+        """Resolves an application as APPROVED or REJECTED."""
+        cursor = await self.conn.execute(
+            """
+            UPDATE society_applications
+            SET status = ?, reviewed_by = ?, review_reason = ?, reviewed_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND status = 'PENDING';
+            """,
+            (status.upper(), reviewer_id, reason, app_id),
+        )
+        await self.conn.commit()
+        return cursor.rowcount > 0

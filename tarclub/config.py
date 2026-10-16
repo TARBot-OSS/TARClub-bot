@@ -24,6 +24,9 @@ class Settings:
     shared_secret: str
     log_level: str
     environment: str
+    enable_console: bool = True
+    review_channel_id: int | None = None
+    superadmin_ids: frozenset[int] = frozenset()
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -50,6 +53,18 @@ class Settings:
         tarveri_db_raw = os.getenv("TARCLUB_TARVERI_DB_PATH", "").strip()
         tarveri_db_path = Path(tarveri_db_raw) if tarveri_db_raw else None
 
+        enable_console = os.getenv("TARCLUB_ENABLE_CONSOLE", "true").lower() in ("true", "1", "yes")
+
+        rev_raw = os.getenv("TARCLUB_REVIEW_CHANNEL_ID", "").strip()
+        review_channel_id = int(rev_raw) if rev_raw.isdigit() else None
+
+        admins_raw = os.getenv("TARCLUB_SUPERADMIN_IDS", "").strip()
+        superadmin_ids = (
+            frozenset(int(x.strip()) for x in admins_raw.split(",") if x.strip().isdigit())
+            if admins_raw
+            else frozenset()
+        )
+
         return cls(
             discord_token=token,
             application_id=application_id,
@@ -60,4 +75,7 @@ class Settings:
             shared_secret=os.getenv("TARCLUB_SHARED_SECRET", ""),
             log_level=os.getenv("TARCLUB_LOG_LEVEL", "INFO").upper(),
             environment=os.getenv("TARCLUB_ENVIRONMENT", "development").lower(),
+            enable_console=enable_console,
+            review_channel_id=review_channel_id,
+            superadmin_ids=superadmin_ids,
         )
