@@ -139,6 +139,75 @@ class SocietyCog(commands.GroupCog, group_name="society"):
         embed.set_footer(text="TARClub Governance Engine • TARBot-OSS")
         await interaction.followup.send(embed=embed, ephemeral=False)
 
+    @app_commands.command(
+        name="theme",
+        description="Customize the branding, colors, emoji, and banners for this society.",
+    )
+    @app_commands.describe(
+        primary_color="Primary brand hex code (e.g. #1E88E5 or #E53935)",
+        secondary_color="Accent brand hex code (e.g. #FFC107)",
+        emoji_badge="Custom or Unicode emoji badge for embeds (e.g. 💻, 🚀, 🎭)",
+        banner_url="Direct image URL for official announcements and roster banners",
+        footer_text="Custom embed footer text",
+    )
+    async def theme(
+        self,
+        interaction: discord.Interaction,
+        primary_color: str | None = None,
+        secondary_color: str | None = None,
+        emoji_badge: str | None = None,
+        banner_url: str | None = None,
+        footer_text: str | None = None,
+    ) -> None:
+        if interaction.guild is None:
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        society = await self.db.get_society(interaction.guild_id)
+        if not society:
+            await interaction.followup.send("❌ Society not registered.", ephemeral=True)
+            return
+
+        # Sanitize hex colors if provided
+        if primary_color and not primary_color.startswith("#"):
+            primary_color = f"#{primary_color}"
+        if secondary_color and not secondary_color.startswith("#"):
+            secondary_color = f"#{secondary_color}"
+
+        await self.db.update_theme(
+            society_id=society["id"],
+            primary_color=primary_color,
+            secondary_color=secondary_color,
+            banner_url=banner_url,
+            emoji_badge=emoji_badge,
+            footer_text=footer_text,
+        )
+
+        updated = await self.db.get_society(interaction.guild_id)
+        assert updated is not None
+
+        color_val = 0x1E88E5
+        try:
+            color_val = int(updated["primary_color"].lstrip("#"), 16)
+        except Exception:
+            pass
+
+        embed = discord.Embed(
+            title=f"🎨 Theme Updated: {updated['name']}",
+            description=(
+                f"**Primary Color:** `{updated['primary_color']}`\n"
+                f"**Secondary Color:** `{updated.get('secondary_color', '#FFC107')}`\n"
+                f"**Emoji Badge:** {updated.get('emoji_badge', '🏛️')}\n"
+                f"**Banner:** {updated.get('banner_url') or '*None*'}"
+            ),
+            color=color_val,
+        )
+        if updated.get("banner_url"):
+            embed.set_image(url=updated["banner_url"])
+
+        embed.set_footer(text=updated.get("footer_text") or "TARClub Theming Engine")
+        await interaction.followup.send(embed=embed, ephemeral=False)
+
 
 async def setup(bot: commands.Bot) -> None:
     db = getattr(bot, "db", None)

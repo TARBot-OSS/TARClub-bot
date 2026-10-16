@@ -39,6 +39,8 @@ class TARClubBot(commands.Bot):
 
         # Load extension cogs
         await self.load_extension("tarclub.cogs.society_cog")
+        await self.load_extension("tarclub.cogs.committee_cog")
+        await self.load_extension("tarclub.cogs.term_cog")
 
         # Sync slash commands
         logger.info("Syncing application command tree...")

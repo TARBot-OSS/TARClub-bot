@@ -220,3 +220,220 @@ class Database(DatabaseBase):
         )
         row = await cursor.fetchone()
         return dict(row) if row else None
+
+    async def get_active_roster(self, society_id: int) -> list[dict[str, Any]]:
+        """Fetch full committee roster for the currently active term."""
+        cursor = await self.conn.execute(
+            """
+            SELECT p.id as position_id, p.title, p.department, p.hierarchy_order,
+                   p.discord_role_id, p.rbac_flags,
+                   cm.user_id, cm.student_id, cm.is_verified_student, cm.appointed_at
+            FROM positions p
+            JOIN terms t ON t.society_id = p.society_id AND t.is_active = 1
+            LEFT JOIN committee_members cm
+                ON cm.position_id = p.id AND cm.term_id = t.id AND cm.relieved_at IS NULL
+            WHERE p.society_id = ?
+            ORDER BY p.hierarchy_order ASC;
+            """,
+            (society_id,),
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+    async def assign_committee_member(
+        self,
+        term_id: int,
+        position_id: int,
+        user_id: int,
+        student_id: str | None = None,
+        is_verified: bool = False,
+    ) -> None:
+        """Appoint a member to a position for an active term."""
+        await self.conn.execute(
+            """
+            INSERT INTO committee_members (
+                term_id, position_id, user_id, student_id, is_verified_student
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(term_id, position_id, user_id) DO UPDATE SET
+                relieved_at = NULL,
+                student_id = excluded.student_id,
+                is_verified_student = excluded.is_verified_student;
+            """,
+            (term_id, position_id, user_id, student_id, 1 if is_verified else 0),
+        )
+        await self.conn.commit()
+
+    async def relieve_committee_member(self, term_id: int, position_id: int, user_id: int) -> bool:
+        """Relieve a committee member from their position."""
+        cursor = await self.conn.execute(
+            """
+            UPDATE committee_members
+            SET relieved_at = CURRENT_TIMESTAMP
+            WHERE term_id = ? AND position_id = ? AND user_id = ? AND relieved_at IS NULL;
+            """,
+            (term_id, position_id, user_id),
+        )
+        await self.conn.commit()
+        return cursor.rowcount > 0
+
+    async def get_user_permissions(self, society_id: int, user_id: int) -> int:
+        """Resolve bitwise aggregated RBAC permissions for a user in the active term."""
+        cursor = await self.conn.execute(
+            """
+            SELECT p.rbac_flags
+            FROM committee_members cm
+            JOIN terms t ON cm.term_id = t.id AND t.is_active = 1
+            JOIN positions p ON cm.position_id = p.id
+            WHERE t.society_id = ? AND cm.user_id = ? AND cm.relieved_at IS NULL;
+            """,
+            (society_id, user_id),
+        )
+        rows = await cursor.fetchall()
+        total = 0
+        for r in rows:
+            total |= r["rbac_flags"]
+        return total
+
+    async def update_theme(
+        self,
+        society_id: int,
+        primary_color: str | None = None,
+        secondary_color: str | None = None,
+        banner_url: str | None = None,
+        logo_url: str | None = None,
+        emoji_badge: str | None = None,
+        footer_text: str | None = None,
+    ) -> None:
+        """Update branding and dynamic theming attributes."""
+        updates: list[str] = []
+        params: list[Any] = []
+
+        if primary_color is not None:
+            updates.append("primary_color = ?")
+            params.append(primary_color)
+        if secondary_color is not None:
+            updates.append("secondary_color = ?")
+            params.append(secondary_color)
+        if banner_url is not None:
+            updates.append("banner_url = ?")
+            params.append(banner_url)
+        if logo_url is not None:
+            updates.append("logo_url = ?")
+            params.append(logo_url)
+        if emoji_badge is not None:
+            updates.append("emoji_badge = ?")
+            params.append(emoji_badge)
+        if footer_text is not None:
+            updates.append("footer_text = ?")
+            params.append(footer_text)
+
+        if not updates:
+            return
+
+        params.append(society_id)
+        query = f"UPDATE society_themes SET {', '.join(updates)} WHERE society_id = ?;"
+        await self.conn.execute(query, tuple(params))
+        await self.conn.commit()
+
+    async def add_custom_position(
+        self,
+        society_id: int,
+        title: str,
+        department: str,
+        hierarchy_order: int,
+        rbac_flags: int = 0,
+    ) -> int:
+        """Add a new custom position to the society template."""
+        cursor = await self.conn.execute(
+            """
+            INSERT INTO positions (
+                society_id, title, department, hierarchy_order, rbac_flags, is_template
+            ) VALUES (?, ?, ?, ?, ?, 0)
+            RETURNING id;
+            """,
+            (society_id, title.strip(), department.upper().strip(), hierarchy_order, rbac_flags),
+        )
+        row = await cursor.fetchone()
+        await self.conn.commit()
+        return row[0]
+
+    async def update_position(
+        self,
+        position_id: int,
+        new_title: str | None = None,
+        department: str | None = None,
+        hierarchy_order: int | None = None,
+        rbac_flags: int | None = None,
+    ) -> None:
+        """Modify an existing position."""
+        updates: list[str] = []
+        params: list[Any] = []
+
+        if new_title is not None:
+            updates.append("title = ?")
+            params.append(new_title.strip())
+        if department is not None:
+            updates.append("department = ?")
+            params.append(department.upper().strip())
+        if hierarchy_order is not None:
+            updates.append("hierarchy_order = ?")
+            params.append(hierarchy_order)
+        if rbac_flags is not None:
+            updates.append("rbac_flags = ?")
+            params.append(rbac_flags)
+
+        if not updates:
+            return
+
+        params.append(position_id)
+        query = f"UPDATE positions SET {', '.join(updates)} WHERE id = ?;"
+        await self.conn.execute(query, tuple(params))
+        await self.conn.commit()
+
+    async def handover_term(
+        self,
+        society_id: int,
+        current_term_id: int,
+        next_academic_year: str,
+        handover_notes: str | None = None,
+    ) -> int:
+        """Conclude active term, archive tenure, and activate the incoming term."""
+        # 1. Archive current term
+        await self.conn.execute(
+            """
+            UPDATE terms
+            SET is_active = 0,
+                end_date = CURRENT_TIMESTAMP,
+                handover_at = CURRENT_TIMESTAMP,
+                handover_notes = ?
+            WHERE id = ?;
+            """,
+            (handover_notes, current_term_id),
+        )
+
+        # 2. Activate incoming term
+        next_term_name = f"Term {next_academic_year}"
+        cursor = await self.conn.execute(
+            """
+            INSERT INTO terms (society_id, term_name, academic_year, is_active)
+            VALUES (?, ?, ?, 1)
+            RETURNING id;
+            """,
+            (society_id, next_term_name, next_academic_year),
+        )
+        row = await cursor.fetchone()
+        await self.conn.commit()
+        return row[0]
+
+    async def get_term_history(self, society_id: int) -> list[dict[str, Any]]:
+        """Fetch all terms past and present for a society."""
+        cursor = await self.conn.execute(
+            """
+            SELECT * FROM terms
+            WHERE society_id = ?
+            ORDER BY id DESC;
+            """,
+            (society_id,),
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
