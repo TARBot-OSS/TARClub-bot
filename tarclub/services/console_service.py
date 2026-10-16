@@ -25,6 +25,56 @@ if TYPE_CHECKING:
 logger = logging.getLogger("tarclub.console")
 
 
+AVAILABLE_COMMANDS = [
+    "help",
+    "status",
+    "guilds",
+    "societies",
+    "privacy",
+    "token",
+    "token create",
+    "token list",
+    "token revoke",
+    "applications",
+    "approve",
+    "reject",
+    "say",
+    "eval",
+    "stop",
+    "exit",
+    "quit",
+]
+
+
+def _console_completer(text: str, state: int) -> str | None:
+    options = [c for c in AVAILABLE_COMMANDS if c.startswith(text.lower())]
+    if state < len(options):
+        return options[state]
+    return None
+
+
+class ConsoleAwareStreamHandler(logging.StreamHandler):
+    """
+    StreamHandler integrating with GNU readline to keep an active console prompt
+    undisturbed while streaming background bot logs in real time.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = self.format(record)
+            stream = self.stream or sys.stdout
+            stream.write(f"\r\033[K{msg}\n")
+            try:
+                import readline
+
+                readline.redisplay()
+            except Exception:
+                pass
+            stream.flush()
+        except Exception:
+            self.handleError(record)
+
+
 class ConsoleService:
     """Provides an interactive CLI prompt on stdin for TARClub root administration."""
 
@@ -53,6 +103,31 @@ class ConsoleService:
             logger.info("[Console] Non-interactive environment detected. Terminal CLI disabled.")
             return
 
+        # Attach ConsoleAwareStreamHandler to root and tarclub loggers
+        try:
+            root_logger = logging.getLogger()
+            fmt = logging.Formatter("%(asctime)s | %(levelname)-7s | %(name)s : %(message)s")
+            handler = ConsoleAwareStreamHandler(sys.stdout)
+            handler.setFormatter(fmt)
+            # Replace existing StreamHandlers writing to sys.stderr/sys.stdout
+            handlers_to_remove = [
+                h for h in root_logger.handlers if type(h) is logging.StreamHandler
+            ]
+            for h in handlers_to_remove:
+                root_logger.removeHandler(h)
+            root_logger.addHandler(handler)
+        except Exception as e:
+            logger.debug("Could not attach ConsoleAwareStreamHandler: %s", e)
+
+        # Configure tab-completion and GNU readline
+        try:
+            import readline
+
+            readline.set_completer(_console_completer)
+            readline.parse_and_bind("tab: complete")
+        except Exception:
+            pass
+
         self.running = True
         self._loop = asyncio.get_running_loop()
         self._thread = threading.Thread(
@@ -63,33 +138,20 @@ class ConsoleService:
         self._thread.start()
         print("\n" + "=" * 60)
         print("🎮 TARClub Minecraft-style Console CLI initialized!")
-        print("Type 'help' or '?' for available console commands.")
+        print("Type 'help' or '?' for available console commands (Tab autocomplete supported).")
         print("=" * 60 + "\n")
-        self._print_prompt()
 
     def stop(self) -> None:
         """Flags the console thread to stop."""
         self.running = False
 
-    def _print_prompt(self) -> None:
-        try:
-            sys.stdout.write(f"\r{self.prompt}")
-            sys.stdout.flush()
-        except Exception:
-            pass
-
     def _reader_loop(self) -> None:
-        """Runs in a daemon thread, reading stdin line by line."""
+        """Runs in a daemon thread, reading stdin line by line with GNU readline support."""
         while self.running:
             try:
-                line = sys.stdin.readline()
-                if not line:
-                    logger.info("[Console] EOF received on stdin. Terminal CLI stopped.")
-                    break
-
+                line = input(self.prompt)
                 cleaned = line.strip()
                 if not cleaned:
-                    self._print_prompt()
                     continue
 
                 if self._loop and self._loop.is_running():
@@ -102,8 +164,9 @@ class ConsoleService:
                         print(f"\n[ERROR] Command failed: {e}")
                 else:
                     break
-
-                self._print_prompt()
+            except (EOFError, KeyboardInterrupt):
+                logger.info("[Console] EOF/Interrupt received. Terminal CLI stopped.")
+                break
             except Exception as e:
                 logger.debug(f"[Console] Error reading stdin: {e}")
                 break
