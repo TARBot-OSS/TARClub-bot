@@ -150,3 +150,64 @@ async def test_console_commands(db: Database, mock_bot, tmp_path: Path):
     # 5. Stop command
     await console.handle_command("stop")
     assert mock_bot.close.called
+
+
+def test_console_completer_tarclub():
+    from tarclub.services.console_service import _console_completer
+
+    patch_empty_buf = patch("readline.get_line_buffer", return_value="")
+    patch_empty_idx = patch("readline.get_begidx", return_value=0)
+    with patch_empty_buf, patch_empty_idx:
+        # Empty line: matches top-level commands
+        first = _console_completer("", 0)
+        valid = (
+            "help", "status", "guilds", "societies", "privacy", "token",
+            "applications", "approve", "reject", "say", "eval", "clear",
+            "stop", "exit", "quit"
+        )
+        assert first in valid
+
+    patch_tok_buf = patch("readline.get_line_buffer", return_value="token ")
+    patch_tok_idx = patch("readline.get_begidx", return_value=6)
+    with patch_tok_buf, patch_tok_idx:
+        # Subcommand token options
+        assert _console_completer("", 0) == "create"
+        assert _console_completer("", 1) == "list"
+        assert _console_completer("", 2) == "revoke"
+
+    patch_list_buf = patch("readline.get_line_buffer", return_value="token list ")
+    patch_list_idx = patch("readline.get_begidx", return_value=11)
+    with patch_list_buf, patch_list_idx:
+        # Token list options
+        assert _console_completer("", 0) == "active"
+        assert _console_completer("", 1) == "used"
+        assert _console_completer("", 2) == "revoked"
+
+    patch_priv_buf = patch("readline.get_line_buffer", return_value="privacy 12345 ")
+    patch_priv_idx = patch("readline.get_begidx", return_value=14)
+    with patch_priv_buf, patch_priv_idx:
+        # Privacy boolean options
+        assert _console_completer("", 0) == "true"
+        assert _console_completer("", 1) == "false"
+
+
+def test_console_escable_help_tarclub(mock_bot, tmp_path: Path):
+    settings = Settings(
+        discord_token="fake_token",
+        application_id=123456,
+        database_path=tmp_path / "test.db",
+        tarveri_bot_id=1542,
+        enable_tarveri_integration=False,
+        tarveri_db_path=None,
+        shared_secret="secret",
+        log_level="INFO",
+        environment="test",
+        enable_console=True,
+    )
+    console = ConsoleService(mock_bot, MagicMock(), settings)
+
+    # In non-TTY fallback, outputs help text
+    captured = io.StringIO()
+    with patch("sys.stdout", captured), patch("sys.stdin.isatty", return_value=False):
+        console._show_escable_help()
+    assert "TARClub Console Commands" in captured.getvalue()

@@ -14,6 +14,7 @@ import logging
 import shlex
 import sys
 import threading
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import discord
@@ -33,9 +34,6 @@ AVAILABLE_COMMANDS = [
     "societies",
     "privacy",
     "token",
-    "token create",
-    "token list",
-    "token revoke",
     "applications",
     "approve",
     "reject",
@@ -47,11 +45,76 @@ AVAILABLE_COMMANDS = [
     "quit",
 ]
 
+FACULTY_CODES = [
+    "FOCS",
+    "FAFB",
+    "FOET",
+    "FOAS",
+    "FOBE",
+    "FCCI",
+    "FSSH",
+    "CPUS",
+]
+
+HELP_LINES = [
+    "======================= TARClub Console Commands =======================",
+    "  help, ?                               Show this interactive help reference",
+    "  status                                View bot latency, connected guilds, societies",
+    "  guilds                                List connected Discord servers",
+    "  societies                             List all registered societies and visibility",
+    "  privacy <guild_id> <true|false>       Toggle public directory visibility",
+    "  token create <code> <name> [fac] [p]  Generate single-use society registration token",
+    "  token list [active|used|revoked]      List registration tokens",
+    "  token revoke <token>                  Revoke an unused registration token",
+    "  applications [status]                 List pending/resolved society applications",
+    "  approve <app_id>                      Approve application & provision server",
+    "  reject <app_id> [reason]              Reject application with reason",
+    "  say <guild_id> <chan_id> <msg>        Send message to a channel as TARClub",
+    "  eval <code>                           Execute Python expression/statement",
+    "  clear                                 Clear terminal screen",
+    "  stop, exit, quit                      Gracefully shut down TARClub",
+    "========================================================================",
+]
+
 
 def _console_completer(text: str, state: int) -> str | None:
-    options = [c for c in AVAILABLE_COMMANDS if c.startswith(text.lower())]
-    if state < len(options):
-        return options[state]
+    try:
+        import readline
+
+        buf = readline.get_line_buffer()
+        begidx = readline.get_begidx()
+        text_before = buf[:begidx].strip()
+        try:
+            words = shlex.split(text_before)
+        except ValueError:
+            words = text_before.split()
+    except Exception:
+        words = []
+
+    matches: list[str] = []
+    if not words:
+        matches = [c for c in AVAILABLE_COMMANDS if c.startswith(text.lower())]
+    elif words == ["token"]:
+        matches = [sub for sub in ["create", "list", "revoke"] if sub.startswith(text.lower())]
+    elif words == ["token", "list"]:
+        matches = [
+            opt for opt in ["active", "used", "revoked", "all"] if opt.startswith(text.lower())
+        ]
+    elif len(words) == 2 and words[0] == "privacy":
+        matches = [opt for opt in ["true", "false"] if opt.startswith(text.lower())]
+    elif words == ["applications"]:
+        matches = [
+            opt
+            for opt in ["pending", "approved", "rejected", "all"]
+            if opt.startswith(text.lower())
+        ]
+    elif len(words) == 4 and words[0] == "token" and words[1] == "create":
+        matches = [f for f in FACULTY_CODES if f.startswith(text.upper())]
+    elif len(words) >= 5 and words[0] == "token" and words[1] == "create":
+        matches = [opt for opt in ["true", "false"] if opt.startswith(text.lower())]
+
+    if state < len(matches):
+        return matches[state]
     return None
 
 
@@ -64,6 +127,11 @@ class ConsoleAwareStreamHandler(logging.StreamHandler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
+            # Audit log records for user console CMD input are saved to file logs,
+            # but not echoed back to console stdout since the user already typed them.
+            if record.name == "tarclub.console" and record.getMessage().startswith("[CMD]"):
+                return
+
             msg = self.format(record)
             stream = self.stream or sys.stdout
             if hasattr(stream, "isatty") and stream.isatty():
@@ -100,21 +168,15 @@ class ConsoleService:
         self.prompt = "tarclub> "
 
     def write_output(self, text: str) -> None:
-        """Outputs text cleanly without disrupting active prompt keystrokes."""
+        """Outputs text cleanly without redisplaying prompt mid-command."""
         stream = sys.stdout
         if stream is None or not hasattr(stream, "isatty") or not stream.isatty():
             print(text)
             return
 
         for line in str(text).splitlines():
-            stream.write(f"\r\033[K{line}\n")
+            stream.write(f"{line}\n")
         stream.flush()
-        try:
-            import readline
-
-            readline.redisplay()
-        except Exception as exc:
-            logger.debug("Readline redisplay notice: %s", exc)
 
     def start(self) -> None:
         """Starts the interactive console thread if running in an interactive terminal."""
@@ -132,8 +194,11 @@ class ConsoleService:
             sys.stdout.write("\033[r")
             sys.stdout.flush()
 
-        # Attach ConsoleAwareStreamHandler to root and tarclub loggers
+        # Attach ConsoleAwareStreamHandler to root and tarclub loggers,
+        # and ensure file handler records logs
         try:
+            from logging.handlers import RotatingFileHandler
+
             root_logger = logging.getLogger()
             fmt = logging.Formatter("%(asctime)s | %(levelname)-7s | %(name)s : %(message)s")
             handler = ConsoleAwareStreamHandler(sys.stdout)
@@ -144,15 +209,42 @@ class ConsoleService:
             for h in handlers_to_remove:
                 root_logger.removeHandler(h)
             root_logger.addHandler(handler)
+
+            logs_dir = Path("logs")
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            has_file_handler = any(
+                isinstance(h, RotatingFileHandler) for h in root_logger.handlers
+            )
+            if not has_file_handler:
+                file_handler = RotatingFileHandler(
+                    logs_dir / "tarclub.log",
+                    maxBytes=2_000_000,
+                    backupCount=5,
+                    encoding="utf-8",
+                )
+                file_handler.setFormatter(fmt)
+                root_logger.addHandler(file_handler)
         except Exception as e:
             logger.debug("Could not attach ConsoleAwareStreamHandler: %s", e)
 
-        # Configure tab-completion and GNU readline
+        # Configure tab-completion and GNU readline history
         try:
             import readline
 
             readline.set_completer(_console_completer)
+            readline.set_completer_delims(" \t\n")
             readline.parse_and_bind("tab: complete")
+            try:
+                readline.set_auto_history(True)
+            except Exception as exc:
+                logger.debug("Readline auto history skipped: %s", exc)
+
+            history_file = Path("logs/.tarclub_history")
+            if history_file.exists():
+                try:
+                    readline.read_history_file(str(history_file))
+                except Exception as exc:
+                    logger.debug("Readline history read skipped: %s", exc)
         except Exception as exc:
             logger.debug("Readline binding skipped: %s", exc)
 
@@ -172,8 +264,60 @@ class ConsoleService:
     def stop(self) -> None:
         """Flags the console thread to stop and restores normal terminal state."""
         self.running = False
+        try:
+            import readline
+
+            history_file = Path("logs/.tarclub_history")
+            history_file.parent.mkdir(parents=True, exist_ok=True)
+            readline.set_history_length(1000)
+            readline.write_history_file(str(history_file))
+        except Exception as exc:
+            logger.debug("Readline history write skipped: %s", exc)
         if sys.stdout is not None and hasattr(sys.stdout, "isatty") and sys.stdout.isatty():
             sys.stdout.write("\033[r\n")
+            sys.stdout.flush()
+
+    def _show_escable_help(self) -> None:
+        """Displays help menu in an alternate screen buffer dismissable with ESC, 'q', or Enter."""
+        if not (
+            sys.stdin
+            and hasattr(sys.stdin, "isatty")
+            and sys.stdin.isatty()
+            and sys.stdout
+            and hasattr(sys.stdout, "isatty")
+            and sys.stdout.isatty()
+        ):
+            self._cmd_help()
+            return
+
+        import termios
+        import tty
+
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            # Enter alternate screen buffer, clear screen, hide cursor
+            sys.stdout.write("\033[?1049h\033[H\033[2J\033[?25l")
+            content = "\n".join(HELP_LINES)
+            sys.stdout.write(
+                content + "\n\n  \033[90m[ Press ESC, 'q', or Enter to return to console ]\033[0m\n"
+            )
+            sys.stdout.flush()
+
+            tty.setcbreak(fd)
+            while True:
+                ch = sys.stdin.read(1)
+                if ch in ("\x1b", "q", "Q", "\r", "\n", " "):
+                    break
+        except Exception as exc:
+            logger.debug("Escable help notice: %s", exc)
+        finally:
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+            except Exception as exc:
+                logger.debug("Terminal settings restore skipped: %s", exc)
+            # Show cursor, restore primary screen buffer
+            sys.stdout.write("\033[?25h\033[?1049l")
             sys.stdout.flush()
 
     def _reader_loop(self) -> None:
@@ -185,8 +329,30 @@ class ConsoleService:
                 if not cleaned:
                     continue
 
-                # Echo command
-                self.write_output(f"\033[33m[CMD] > {cleaned}\033[0m")
+                # Save to readline history so Up / Down arrow keys can scroll through history
+                try:
+                    import readline
+
+                    last_item = readline.get_history_item(
+                        readline.get_current_history_length()
+                    )
+                    if last_item != cleaned:
+                        readline.add_history(cleaned)
+                    history_file = Path("logs/.tarclub_history")
+                    history_file.parent.mkdir(parents=True, exist_ok=True)
+                    readline.set_history_length(1000)
+                    readline.write_history_file(str(history_file))
+                except Exception as exc:
+                    logger.debug("History save notice: %s", exc)
+
+                # Record user CMD input with timestamp into bot file logs
+                logger.info("[CMD] Executed: %s", cleaned)
+
+                # Escable help menu: rendered in alternate screen buffer
+                # so it never clutters logs or scrollback
+                if cleaned.lower() in ("help", "?"):
+                    self._show_escable_help()
+                    continue
 
                 if self._loop and self._loop.is_running():
                     future = asyncio.run_coroutine_threadsafe(
@@ -257,26 +423,7 @@ class ConsoleService:
     # ==========================================
 
     def _cmd_help(self) -> None:
-        help_text = """
-======================= TARClub Console Commands =======================
-  help, ?                               Show this command reference
-  status                                View bot latency, connected guilds, societies
-  guilds                                List connected Discord servers
-  societies                             List all registered societies and visibility
-  privacy <guild_id> <true|false>       Toggle public directory visibility
-  token create <code> <name> [fac] [p]  Generate single-use society registration token
-  token list [active|used|revoked]      List registration tokens
-  token revoke <token>                  Revoke an unused registration token
-  applications                          List pending society registration requests
-  approve <app_id>                      Approve application & provision server
-  reject <app_id> [reason]              Reject application with reason
-  say <guild_id> <chan_id> <msg>        Send message to a channel as TARClub
-  eval <code>                           Execute Python expression/statement
-  clear                                 Clear terminal screen
-  stop, exit, quit                      Gracefully shut down TARClub
-========================================================================
-"""
-        self.write_output(help_text.strip())
+        self.write_output("\n".join(HELP_LINES))
 
     def _cmd_clear(self) -> None:
         if sys.stdout is not None and hasattr(sys.stdout, "isatty") and sys.stdout.isatty():
