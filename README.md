@@ -13,14 +13,14 @@
 
 - **Multi-Tenant Society Registration**: Each server registers as an independent society (`/society register [name] [code] [faculty]`).
 - **Dynamic Theming Engine**: Custom primary/secondary hex colors, branded Discord roles, banner assets, custom emojis, and embed footers per society.
-- **14-Role Starter Template & Hierarchy**: Pre-loaded TAR UMT standard club hierarchy (Chairperson down to Internal Auditor) that committees can dynamically customize or expand.
-- **Granular Bitwise RBAC**: 12 fine-grained permissions controlling announcements, event scheduling, budget requests, audit trails, and member assignments.
+- **15-Role Starter Template & Hierarchy**: Pre-loaded TAR UMT standard club hierarchy (Chairperson down to General Member) that committees can dynamically customize or expand.
+- **Granular Bitwise RBAC**: 15 fine-grained permissions controlling announcements, event scheduling, budget requests, audit trails, and member assignments.
 - **Annual Committee Term Handover**: Two-step quorum handover wizard that smoothly transitions active committees to `@Alumni Exco (Term)` and installs incoming teams.
 - **Cross-Bot Bridge with TARVeri**: Co-location auto-discovery and eligibility checks ensuring only verified TAR UMT students hold executive committee seats.
 
 ---
 
-## 👥 Standard 14-Role Starter Hierarchy
+## 👥 Standard 15-Role Starter Hierarchy
 
 ```
                     ┌────────────────────────┐
@@ -53,33 +53,36 @@
             │   └─ Publicity Member                 │
             │ • Art and Promotion Director          │
             │ • Internal Auditor                    │
-            └───────────────────────────────────────┘
+            └───────────────────┬───────────────────┘
+                                │
+                    ┌───────────┴────────────┐
+                    │     General Member     │
+                    │   (Normal Membership)  │
+                    └────────────────────────┘
 ```
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Quick Setup
 
-### 1. Clone & Setup
+### 1. Prerequisites
+* Python 3.11+
+* Discord Bot Token with **Server Members Intent** enabled in [Discord Developer Portal](https://discord.com/developers/applications).
+
+### 2. Install & Configure
 ```bash
 git clone https://github.com/TARBot-OSS/TARClub-bot.git
 cd TARClub-bot
-
-# Create virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
-
-# Install dependencies
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-```
-
-### 2. Configure Environment
-```bash
 cp .env.example .env
-# Edit .env with your Discord Bot Token
+```
+Edit `.env`:
+```env
+TARCLUB_DISCORD_TOKEN="your_discord_bot_token"
 ```
 
-### 3. Run the Bot
+### 3. Run
 ```bash
 python -m tarclub
 ```
