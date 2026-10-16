@@ -3,8 +3,8 @@ Interactive Console CLI Service for TARClub (Minecraft-style Terminal Backend).
 
 Allows bot hosters and administrators to execute root management commands,
 generate single-use society registration tokens, approve/reject applications,
-audit registered societies, and broadcast messages directly from the terminal/tmux session.
-Features a pinned bottom input bar with live streaming logs in an upper viewport.
+audit registered societies, and broadcast messages directly from the terminal/tmux
+session with full scrollback support.
 """
 
 from __future__ import annotations
@@ -12,11 +12,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import shlex
-import shutil
-import signal
 import sys
 import threading
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import discord
 
@@ -43,6 +41,7 @@ AVAILABLE_COMMANDS = [
     "reject",
     "say",
     "eval",
+    "clear",
     "stop",
     "exit",
     "quit",
@@ -58,38 +57,33 @@ def _console_completer(text: str, state: int) -> str | None:
 
 class ConsoleAwareStreamHandler(logging.StreamHandler):
     """
-    StreamHandler that routes background logs into a pinned upper scrolling viewport
-    above the fixed bottom prompt bar using DECSTBM ANSI margins.
+    StreamHandler that writes logs cleanly without disrupting active console
+    prompt keystrokes, using line-clearing carriage return and readline redisplay.
+    Preserves 100% of terminal and tmux scrollback history.
     """
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
             msg = self.format(record)
             stream = self.stream or sys.stdout
-            is_tty = hasattr(stream, "isatty") and stream.isatty()
-            if is_tty:
-                _, rows = shutil.get_terminal_size()
-                if rows > 4:
-                    # Save cursor, jump to bottom of scrolling viewport, print log, restore cursor
-                    stream.write(f"\033[s\033[{rows - 2};1H\n{msg}\033[u")
-                    stream.flush()
-                    try:
-                        import readline
+            if hasattr(stream, "isatty") and stream.isatty():
+                stream.write(f"\r\033[K{msg}\n")
+                stream.flush()
+                try:
+                    import readline
 
-                        readline.redisplay()
-                    except Exception as exc:
-                        logger.debug("Readline redisplay skipped: %s", exc)
-                    return
-
-            # Fallback for non-TTY or small window
-            stream.write(f"\r\033[K{msg}\n" if is_tty else f"{msg}\n")
-            stream.flush()
+                    readline.redisplay()
+                except Exception as exc:
+                    logger.debug("Readline redisplay skipped: %s", exc)
+            else:
+                stream.write(f"{msg}\n")
+                stream.flush()
         except Exception:
             self.handleError(record)
 
 
 class ConsoleService:
-    """Provides an interactive CLI prompt pinned to the terminal bottom."""
+    """Provides an interactive CLI prompt for TARClub without disrupting terminal scrollback."""
 
     def __init__(
         self,
@@ -105,50 +99,22 @@ class ConsoleService:
         self._loop: asyncio.AbstractEventLoop | None = None
         self.prompt = "tarclub> "
 
-    def _setup_viewport(self) -> None:
-        """Sets up ANSI DECSTBM scrolling margins for upper logs with pinned bottom prompt."""
-        if sys.stdout is None or not hasattr(sys.stdout, "isatty") or not sys.stdout.isatty():
-            return
-        cols, rows = shutil.get_terminal_size()
-        if rows > 4:
-            # Set scroll region: lines 1 to rows - 2
-            sys.stdout.write(f"\033[1;{rows - 2}r")
-            # Draw cyan divider bar on row rows - 1
-            sys.stdout.write(f"\033[{rows - 1};1H\033[2K\033[36m{'─' * cols}\033[0m")
-            # Move cursor to bottom row
-            sys.stdout.write(f"\033[{rows};1H\033[2K")
-            sys.stdout.flush()
-            try:
-                import readline
-
-                readline.redisplay()
-            except Exception as exc:
-                logger.debug("Readline redisplay notice: %s", exc)
-
-    def _handle_winch(self, *_: Any) -> None:
-        """Re-establishes terminal boundaries when the terminal window is resized."""
-        if self.running:
-            self._setup_viewport()
-
     def write_output(self, text: str) -> None:
-        """Outputs text into the upper scrolling viewport without displacing bottom prompt."""
-        if sys.stdout is None or not hasattr(sys.stdout, "isatty") or not sys.stdout.isatty():
+        """Outputs text cleanly without disrupting active prompt keystrokes."""
+        stream = sys.stdout
+        if stream is None or not hasattr(stream, "isatty") or not stream.isatty():
             print(text)
             return
 
-        _, rows = shutil.get_terminal_size()
-        if rows > 4 and self.running:
-            for line in str(text).splitlines():
-                sys.stdout.write(f"\033[s\033[{rows - 2};1H\n{line}\033[u")
-            sys.stdout.flush()
-            try:
-                import readline
+        for line in str(text).splitlines():
+            stream.write(f"\r\033[K{line}\n")
+        stream.flush()
+        try:
+            import readline
 
-                readline.redisplay()
-            except Exception as exc:
-                logger.debug("Readline redisplay notice: %s", exc)
-        else:
-            print(text)
+            readline.redisplay()
+        except Exception as exc:
+            logger.debug("Readline redisplay notice: %s", exc)
 
     def start(self) -> None:
         """Starts the interactive console thread if running in an interactive terminal."""
@@ -160,6 +126,11 @@ class ConsoleService:
         if sys.stdin is None or not hasattr(sys.stdin, "isatty") or not sys.stdin.isatty():
             logger.info("[Console] Non-interactive environment detected. Terminal CLI disabled.")
             return
+
+        # Reset any lingering scroll margins from prior runs
+        if sys.stdout is not None and hasattr(sys.stdout, "isatty") and sys.stdout.isatty():
+            sys.stdout.write("\033[r")
+            sys.stdout.flush()
 
         # Attach ConsoleAwareStreamHandler to root and tarclub loggers
         try:
@@ -185,15 +156,8 @@ class ConsoleService:
         except Exception as exc:
             logger.debug("Readline binding skipped: %s", exc)
 
-        # Register terminal resize handler
-        try:
-            signal.signal(signal.SIGWINCH, self._handle_winch)
-        except Exception as exc:
-            logger.debug("SIGWINCH handler skipped: %s", exc)
-
         self.running = True
         self._loop = asyncio.get_running_loop()
-        self._setup_viewport()
 
         self._thread = threading.Thread(
             target=self._reader_loop,
@@ -202,34 +166,26 @@ class ConsoleService:
         )
         self._thread.start()
         self.write_output(
-            "🎮 TARClub Console initialized (Bottom input bar pinned). Type 'help' for commands."
+            "🎮 TARClub Console initialized. Type 'help' for commands."
         )
 
     def stop(self) -> None:
-        """Flags the console thread to stop and restores full terminal scroll margins."""
+        """Flags the console thread to stop and restores normal terminal state."""
         self.running = False
         if sys.stdout is not None and hasattr(sys.stdout, "isatty") and sys.stdout.isatty():
-            _, rows = shutil.get_terminal_size()
-            sys.stdout.write(f"\033[r\033[{rows};1H\033[2K\n")
+            sys.stdout.write("\033[r\n")
             sys.stdout.flush()
 
     def _reader_loop(self) -> None:
         """Runs in a daemon thread, reading stdin line by line with GNU readline support."""
         while self.running:
             try:
-                # Ensure cursor is docked on bottom row
-                if sys.stdout.isatty():
-                    _, rows = shutil.get_terminal_size()
-                    if rows > 4:
-                        sys.stdout.write(f"\033[{rows};1H")
-                        sys.stdout.flush()
-
                 line = input(self.prompt)
                 cleaned = line.strip()
                 if not cleaned:
                     continue
 
-                # Echo command into upper log viewport
+                # Echo command
                 self.write_output(f"\033[33m[CMD] > {cleaned}\033[0m")
 
                 if self._loop and self._loop.is_running():
@@ -286,6 +242,8 @@ class ConsoleService:
                 await self._cmd_say(args)
             elif cmd == "eval":
                 await self._cmd_eval(args)
+            elif cmd == "clear":
+                self._cmd_clear()
             elif cmd in ("stop", "exit", "quit"):
                 await self._cmd_stop()
             else:
@@ -314,10 +272,16 @@ class ConsoleService:
   reject <app_id> [reason]              Reject application with reason
   say <guild_id> <chan_id> <msg>        Send message to a channel as TARClub
   eval <code>                           Execute Python expression/statement
+  clear                                 Clear terminal screen
   stop, exit, quit                      Gracefully shut down TARClub
 ========================================================================
 """
         self.write_output(help_text.strip())
+
+    def _cmd_clear(self) -> None:
+        if sys.stdout is not None and hasattr(sys.stdout, "isatty") and sys.stdout.isatty():
+            sys.stdout.write("\033[2J\033[H")
+            sys.stdout.flush()
 
     async def _cmd_status(self) -> None:
         latency_ms = round(self.bot.latency * 1000, 1) if self.bot.latency else 0

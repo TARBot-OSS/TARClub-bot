@@ -140,6 +140,13 @@ async def test_console_commands(db: Database, mock_bot, tmp_path: Path):
         await console.handle_command("token list")
     assert "TARUMT-GD" in captured.getvalue()
 
-    # 4. Stop command
+    # 4. Clear command
+    mock_stdout = MagicMock()
+    mock_stdout.isatty.return_value = True
+    with patch("sys.stdout", mock_stdout):
+        await console.handle_command("clear")
+        mock_stdout.write.assert_called_with("\033[2J\033[H")
+
+    # 5. Stop command
     await console.handle_command("stop")
     assert mock_bot.close.called
