@@ -12,13 +12,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import shlex
-import shutil
 import sys
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import discord
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import NestedCompleter
+from prompt_toolkit.formatted_text import ANSI
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.patch_stdout import patch_stdout
+from prompt_toolkit.shortcuts import CompleteStyle
 
 if TYPE_CHECKING:
     from tarclub.bot import TARClubBot
@@ -121,8 +126,8 @@ def _console_completer(text: str, state: int) -> str | None:
 
 class ConsoleAwareStreamHandler(logging.StreamHandler):
     """
-    StreamHandler that writes background logs cleanly above the bottom prompt,
-    preserving full terminal/tmux scrollback without prompt overlapping.
+    StreamHandler that writes background logs cleanly above the interactive prompt,
+    compatible with prompt_toolkit and preserving full terminal/tmux scrollback.
     """
 
     _prompt_active: bool = False
@@ -135,33 +140,8 @@ class ConsoleAwareStreamHandler(logging.StreamHandler):
                 return
 
             msg = self.format(record)
-            stream = self.stream or sys.stdout
-            is_tty = hasattr(stream, "isatty") and stream.isatty()
-
-            if is_tty and self._prompt_active:
-                cols, rows = shutil.get_terminal_size()
-                if rows > 4:
-                    divider = f"\033[36m{'─' * cols}\033[0m"
-                    stream.write(
-                        f"\033[{rows - 1};1H\033[2K"
-                        f"\033[{rows};1H\033[2K"
-                        f"\033[{rows - 1};1H{msg}\n"
-                        f"{divider}\n"
-                        f"\033[{rows};1H\033[2K"
-                    )
-                    stream.flush()
-                    try:
-                        import readline
-
-                        readline.redisplay()
-                    except Exception as exc:
-                        logger.debug("Readline redisplay skipped: %s", exc)
-                else:
-                    stream.write(f"\r\033[K{msg}\n")
-                    stream.flush()
-            else:
-                stream.write(f"{msg}\n")
-                stream.flush()
+            sys.stdout.write(f"{msg}\n")
+            sys.stdout.flush()
         except Exception:
             self.handleError(record)
 
@@ -243,27 +223,6 @@ class ConsoleService:
         except Exception as e:
             logger.debug("Could not attach ConsoleAwareStreamHandler: %s", e)
 
-        # Configure tab-completion and GNU readline history
-        try:
-            import readline
-
-            readline.set_completer(_console_completer)
-            readline.set_completer_delims(" \t\n")
-            readline.parse_and_bind("tab: complete")
-            try:
-                readline.set_auto_history(True)
-            except Exception as exc:
-                logger.debug("Readline auto history skipped: %s", exc)
-
-            history_file = Path("logs/.tarclub_history")
-            if history_file.exists():
-                try:
-                    readline.read_history_file(str(history_file))
-                except Exception as exc:
-                    logger.debug("Readline history read skipped: %s", exc)
-        except Exception as exc:
-            logger.debug("Readline binding skipped: %s", exc)
-
         self.running = True
         self._loop = asyncio.get_running_loop()
 
@@ -274,22 +233,13 @@ class ConsoleService:
         )
         self._thread.start()
         self.write_output(
-            "🎮 TARClub Console initialized. Type 'help' for commands."
+            "🎮 TARClub Console initialized. Type 'help' for commands | 'exit' to quit."
         )
 
     def stop(self) -> None:
         """Flags the console thread to stop and restores normal terminal state."""
         self.running = False
         ConsoleAwareStreamHandler._prompt_active = False
-        try:
-            import readline
-
-            history_file = Path("logs/.tarclub_history")
-            history_file.parent.mkdir(parents=True, exist_ok=True)
-            readline.set_history_length(1000)
-            readline.write_history_file(str(history_file))
-        except Exception as exc:
-            logger.debug("Readline history write skipped: %s", exc)
         if sys.stdout is not None and hasattr(sys.stdout, "isatty") and sys.stdout.isatty():
             sys.stdout.write("\033[r\n")
             sys.stdout.flush()
@@ -338,70 +288,79 @@ class ConsoleService:
             sys.stdout.flush()
 
     def _reader_loop(self) -> None:
-        """Runs in a daemon thread, reading stdin line by line with GNU readline support."""
-        while self.running:
-            try:
-                # Render divider bar and dock prompt at the bottom row if interactive TTY
-                if sys.stdout is not None and hasattr(sys.stdout, "isatty") and sys.stdout.isatty():
-                    cols, rows = shutil.get_terminal_size()
-                    if rows > 4:
-                        divider = f"\033[36m{'─' * cols}\033[0m"
-                        sys.stdout.write(
-                            f"\033[{rows - 1};1H\033[2K{divider}\n\033[{rows};1H\033[2K"
-                        )
-                        sys.stdout.flush()
+        """Runs in a daemon thread, reading stdin line by line with prompt_toolkit support."""
+        history_file = Path("logs/.tarclub_history")
+        history_file.parent.mkdir(parents=True, exist_ok=True)
 
-                ConsoleAwareStreamHandler._prompt_active = True
+        completer = NestedCompleter.from_nested_dict({
+            "help": None,
+            "?": None,
+            "status": None,
+            "guilds": None,
+            "societies": None,
+            "privacy": {"true": None, "false": None},
+            "token": {
+                "create": None,
+                "list": {"active": None, "used": None, "revoked": None},
+                "revoke": None,
+                "prune": None,
+            },
+            "applications": {"pending": None, "approved": None, "rejected": None},
+            "approve": None,
+            "reject": None,
+            "backup": {"snapshot": None, "manual": None},
+            "say": None,
+            "eval": None,
+            "clear": None,
+            "stop": None,
+            "exit": None,
+            "quit": None,
+        })
+
+        session: PromptSession[str] = PromptSession(
+            history=FileHistory(str(history_file)),
+            completer=completer,
+            complete_style=CompleteStyle.READLINE_LIKE,
+        )
+
+        with patch_stdout(raw=True):
+            while self.running:
                 try:
-                    line = input(self.prompt)
-                finally:
-                    ConsoleAwareStreamHandler._prompt_active = False
-
-                cleaned = line.strip()
-                if not cleaned:
-                    continue
-
-                # Save to readline history so Up / Down arrow keys can scroll through history
-                try:
-                    import readline
-
-                    last_item = readline.get_history_item(
-                        readline.get_current_history_length()
-                    )
-                    if last_item != cleaned:
-                        readline.add_history(cleaned)
-                    history_file = Path("logs/.tarclub_history")
-                    history_file.parent.mkdir(parents=True, exist_ok=True)
-                    readline.set_history_length(1000)
-                    readline.write_history_file(str(history_file))
-                except Exception as exc:
-                    logger.debug("History save notice: %s", exc)
-
-                # Record user CMD input with timestamp into bot file logs
-                logger.info("[CMD] Executed: %s", cleaned)
-
-                # Escable help menu: rendered in alternate screen buffer
-                # so it never clutters logs or scrollback
-                if cleaned.lower() in ("help", "?"):
-                    self._show_escable_help()
-                    continue
-
-                if self._loop and self._loop.is_running():
-                    future = asyncio.run_coroutine_threadsafe(
-                        self.handle_command(cleaned), self._loop
-                    )
+                    ConsoleAwareStreamHandler._prompt_active = True
                     try:
-                        future.result(timeout=30)
-                    except Exception as e:
-                        self.write_output(f"[ERROR] Command failed: {e}")
-                else:
+                        line = session.prompt(ANSI("\033[1;36mtarclub>\033[0m "))
+                    finally:
+                        ConsoleAwareStreamHandler._prompt_active = False
+
+                    cleaned = line.strip()
+                    if not cleaned:
+                        continue
+
+                    # Record user CMD input with timestamp into bot file logs
+                    logger.info("[CMD] Executed: %s", cleaned)
+
+                    # Escable help menu: rendered in alternate screen buffer
+                    # so it never clutters logs or scrollback
+                    if cleaned.lower() in ("help", "?"):
+                        self._show_escable_help()
+                        continue
+
+                    if self._loop and self._loop.is_running():
+                        future = asyncio.run_coroutine_threadsafe(
+                            self.handle_command(cleaned), self._loop
+                        )
+                        try:
+                            future.result(timeout=30)
+                        except Exception as e:
+                            self.write_output(f"[ERROR] Command failed: {e}")
+                    else:
+                        break
+                except (EOFError, KeyboardInterrupt):
+                    logger.info("[Console] EOF/Interrupt received. Terminal CLI stopped.")
                     break
-            except (EOFError, KeyboardInterrupt):
-                logger.info("[Console] EOF/Interrupt received. Terminal CLI stopped.")
-                break
-            except Exception as e:
-                logger.debug("Error reading stdin: %s", e)
-                break
+                except Exception as e:
+                    logger.debug("Error reading stdin: %s", e)
+                    break
 
     async def handle_command(self, raw_line: str) -> None:
         """Parses and executes a console command line."""
