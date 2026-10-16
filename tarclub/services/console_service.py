@@ -4,6 +4,7 @@ Interactive Console CLI Service for TARClub (Minecraft-style Terminal Backend).
 Allows bot hosters and administrators to execute root management commands,
 generate single-use society registration tokens, approve/reject applications,
 audit registered societies, and broadcast messages directly from the terminal/tmux session.
+Features a pinned bottom input bar with live streaming logs in an upper viewport.
 """
 
 from __future__ import annotations
@@ -11,9 +12,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import shlex
+import shutil
+import signal
 import sys
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import discord
 
@@ -55,28 +58,38 @@ def _console_completer(text: str, state: int) -> str | None:
 
 class ConsoleAwareStreamHandler(logging.StreamHandler):
     """
-    StreamHandler integrating with GNU readline to keep an active console prompt
-    undisturbed while streaming background bot logs in real time.
+    StreamHandler that routes background logs into a pinned upper scrolling viewport
+    above the fixed bottom prompt bar using DECSTBM ANSI margins.
     """
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
             msg = self.format(record)
             stream = self.stream or sys.stdout
-            stream.write(f"\r\033[K{msg}\n")
-            try:
-                import readline
+            is_tty = hasattr(stream, "isatty") and stream.isatty()
+            if is_tty:
+                _, rows = shutil.get_terminal_size()
+                if rows > 4:
+                    # Save cursor, jump to bottom of scrolling viewport, print log, restore cursor
+                    stream.write(f"\033[s\033[{rows - 2};1H\n{msg}\033[u")
+                    stream.flush()
+                    try:
+                        import readline
 
-                readline.redisplay()
-            except Exception:
-                pass
+                        readline.redisplay()
+                    except Exception as exc:
+                        logger.debug("Readline redisplay skipped: %s", exc)
+                    return
+
+            # Fallback for non-TTY or small window
+            stream.write(f"\r\033[K{msg}\n" if is_tty else f"{msg}\n")
             stream.flush()
         except Exception:
             self.handleError(record)
 
 
 class ConsoleService:
-    """Provides an interactive CLI prompt on stdin for TARClub root administration."""
+    """Provides an interactive CLI prompt pinned to the terminal bottom."""
 
     def __init__(
         self,
@@ -91,6 +104,51 @@ class ConsoleService:
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self.prompt = "tarclub> "
+
+    def _setup_viewport(self) -> None:
+        """Sets up ANSI DECSTBM scrolling margins for upper logs with pinned bottom prompt."""
+        if sys.stdout is None or not hasattr(sys.stdout, "isatty") or not sys.stdout.isatty():
+            return
+        cols, rows = shutil.get_terminal_size()
+        if rows > 4:
+            # Set scroll region: lines 1 to rows - 2
+            sys.stdout.write(f"\033[1;{rows - 2}r")
+            # Draw cyan divider bar on row rows - 1
+            sys.stdout.write(f"\033[{rows - 1};1H\033[2K\033[36m{'─' * cols}\033[0m")
+            # Move cursor to bottom row
+            sys.stdout.write(f"\033[{rows};1H\033[2K")
+            sys.stdout.flush()
+            try:
+                import readline
+
+                readline.redisplay()
+            except Exception as exc:
+                logger.debug("Readline redisplay notice: %s", exc)
+
+    def _handle_winch(self, *_: Any) -> None:
+        """Re-establishes terminal boundaries when the terminal window is resized."""
+        if self.running:
+            self._setup_viewport()
+
+    def write_output(self, text: str) -> None:
+        """Outputs text into the upper scrolling viewport without displacing bottom prompt."""
+        if sys.stdout is None or not hasattr(sys.stdout, "isatty") or not sys.stdout.isatty():
+            print(text)
+            return
+
+        _, rows = shutil.get_terminal_size()
+        if rows > 4 and self.running:
+            for line in str(text).splitlines():
+                sys.stdout.write(f"\033[s\033[{rows - 2};1H\n{line}\033[u")
+            sys.stdout.flush()
+            try:
+                import readline
+
+                readline.redisplay()
+            except Exception as exc:
+                logger.debug("Readline redisplay notice: %s", exc)
+        else:
+            print(text)
 
     def start(self) -> None:
         """Starts the interactive console thread if running in an interactive terminal."""
@@ -109,7 +167,6 @@ class ConsoleService:
             fmt = logging.Formatter("%(asctime)s | %(levelname)-7s | %(name)s : %(message)s")
             handler = ConsoleAwareStreamHandler(sys.stdout)
             handler.setFormatter(fmt)
-            # Replace existing StreamHandlers writing to sys.stderr/sys.stdout
             handlers_to_remove = [
                 h for h in root_logger.handlers if type(h) is logging.StreamHandler
             ]
@@ -125,34 +182,55 @@ class ConsoleService:
 
             readline.set_completer(_console_completer)
             readline.parse_and_bind("tab: complete")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Readline binding skipped: %s", exc)
+
+        # Register terminal resize handler
+        try:
+            signal.signal(signal.SIGWINCH, self._handle_winch)
+        except Exception as exc:
+            logger.debug("SIGWINCH handler skipped: %s", exc)
 
         self.running = True
         self._loop = asyncio.get_running_loop()
+        self._setup_viewport()
+
         self._thread = threading.Thread(
             target=self._reader_loop,
             daemon=True,
             name="tarclub_console_reader",
         )
         self._thread.start()
-        print("\n" + "=" * 60)
-        print("🎮 TARClub Minecraft-style Console CLI initialized!")
-        print("Type 'help' or '?' for available console commands (Tab autocomplete supported).")
-        print("=" * 60 + "\n")
+        self.write_output(
+            "🎮 TARClub Console initialized (Bottom input bar pinned). Type 'help' for commands."
+        )
 
     def stop(self) -> None:
-        """Flags the console thread to stop."""
+        """Flags the console thread to stop and restores full terminal scroll margins."""
         self.running = False
+        if sys.stdout is not None and hasattr(sys.stdout, "isatty") and sys.stdout.isatty():
+            _, rows = shutil.get_terminal_size()
+            sys.stdout.write(f"\033[r\033[{rows};1H\033[2K\n")
+            sys.stdout.flush()
 
     def _reader_loop(self) -> None:
         """Runs in a daemon thread, reading stdin line by line with GNU readline support."""
         while self.running:
             try:
+                # Ensure cursor is docked on bottom row
+                if sys.stdout.isatty():
+                    _, rows = shutil.get_terminal_size()
+                    if rows > 4:
+                        sys.stdout.write(f"\033[{rows};1H")
+                        sys.stdout.flush()
+
                 line = input(self.prompt)
                 cleaned = line.strip()
                 if not cleaned:
                     continue
+
+                # Echo command into upper log viewport
+                self.write_output(f"\033[33m[CMD] > {cleaned}\033[0m")
 
                 if self._loop and self._loop.is_running():
                     future = asyncio.run_coroutine_threadsafe(
@@ -161,14 +239,14 @@ class ConsoleService:
                     try:
                         future.result(timeout=30)
                     except Exception as e:
-                        print(f"\n[ERROR] Command failed: {e}")
+                        self.write_output(f"[ERROR] Command failed: {e}")
                 else:
                     break
             except (EOFError, KeyboardInterrupt):
                 logger.info("[Console] EOF/Interrupt received. Terminal CLI stopped.")
                 break
             except Exception as e:
-                logger.debug(f"[Console] Error reading stdin: {e}")
+                logger.debug("Error reading stdin: %s", e)
                 break
 
     async def handle_command(self, raw_line: str) -> None:
@@ -176,7 +254,7 @@ class ConsoleService:
         try:
             parts = shlex.split(raw_line)
         except ValueError as exc:
-            print(f"[ERROR] Syntax error parsing command line: {exc}")
+            self.write_output(f"[ERROR] Syntax error parsing command line: {exc}")
             return
 
         if not parts:
@@ -211,9 +289,9 @@ class ConsoleService:
             elif cmd in ("stop", "exit", "quit"):
                 await self._cmd_stop()
             else:
-                print(f"[WARN] Unknown command '{cmd}'. Type 'help' for available commands.")
+                self.write_output(f"[WARN] Unknown command '{cmd}'. Type 'help' for commands.")
         except Exception as e:
-            print(f"[ERROR] Unhandled exception during command '{cmd}': {e}")
+            self.write_output(f"[ERROR] Unhandled exception during command '{cmd}': {e}")
             logger.exception("Console command error")
 
     # ==========================================
@@ -239,7 +317,7 @@ class ConsoleService:
   stop, exit, quit                      Gracefully shut down TARClub
 ========================================================================
 """
-        print(help_text.strip())
+        self.write_output(help_text.strip())
 
     async def _cmd_status(self) -> None:
         latency_ms = round(self.bot.latency * 1000, 1) if self.bot.latency else 0
@@ -261,53 +339,59 @@ class ConsoleService:
         )
         pending_apps = (await cursor.fetchone())[0]
 
-        print(
-            f"[STATUS] Bot User: {self.bot.user} "
-            f"(ID: {self.bot.user.id if self.bot.user else 'N/A'})"
-        )
-        print(f"[STATUS] WebSocket Ping: {latency_ms} ms | Guilds: {guilds_count}")
-        print(f"[STATUS] Registered Societies: {soc_count} | Active Terms: {active_terms}")
-        print(f"[STATUS] Active Tokens: {active_tokens} | Pending Applications: {pending_apps}")
-        print(f"[STATUS] Database: {self.settings.database_path}")
+        usr_tag = str(self.bot.user) if self.bot.user else "N/A"
+        usr_id = self.bot.user.id if self.bot.user else "N/A"
+        lines = [
+            f"[STATUS] Bot User: {usr_tag} (ID: {usr_id})",
+            f"[STATUS] WebSocket Ping: {latency_ms} ms | Guilds: {guilds_count}",
+            f"[STATUS] Registered Societies: {soc_count} | Active Terms: {active_terms}",
+            f"[STATUS] Active Tokens: {active_tokens} | Pending Applications: {pending_apps}",
+            f"[STATUS] Database: {self.settings.database_path}",
+        ]
+        self.write_output("\n".join(lines))
 
     async def _cmd_guilds(self) -> None:
         if not self.bot.guilds:
-            print("[INFO] No connected guilds.")
+            self.write_output("[INFO] No connected guilds.")
             return
 
-        print(f"\n--- Connected Guilds ({len(self.bot.guilds)}) ---")
+        lines = [f"\n--- Connected Guilds ({len(self.bot.guilds)}) ---"]
         for g in self.bot.guilds:
             soc = await self.db.get_society(g.id)
             soc_tag = f"[{soc['society_code']}] {soc['name']}" if soc else "(Not Registered)"
-            print(f"• [{g.id}] {g.name:<30} | Members: {g.member_count:<5} | Society: {soc_tag}")
-        print("------------------------------------------------")
+            lines.append(
+                f"• [{g.id}] {g.name:<30} | Members: {g.member_count:<5} | Society: {soc_tag}"
+            )
+        lines.append("------------------------------------------------")
+        self.write_output("\n".join(lines))
 
     async def _cmd_societies(self) -> None:
         cursor = await self.db.conn.execute("SELECT * FROM societies ORDER BY id ASC;")
         rows = await cursor.fetchall()
         if not rows:
-            print("[INFO] No societies registered yet.")
+            self.write_output("[INFO] No societies registered yet.")
             return
 
-        print(f"\n--- Registered Societies ({len(rows)}) ---")
+        lines = [f"\n--- Registered Societies ({len(rows)}) ---"]
         for r in rows:
             soc = dict(r)
             vis = "🔒 Private" if soc.get("is_private") else "🌐 Public "
-            print(
+            lines.append(
                 f"• ID: {soc['id']:<2} | Code: {soc['society_code']:<12} | "
                 f"Faculty: {soc['faculty']:<6} | {vis} | Guild: {soc['guild_id']}\n"
                 f"  Name: {soc['name']}"
             )
-        print("------------------------------------------")
+        lines.append("------------------------------------------")
+        self.write_output("\n".join(lines))
 
     async def _cmd_privacy(self, args: list[str]) -> None:
         if len(args) < 2:
-            print("[WARN] Usage: privacy <guild_id> <true|false>")
+            self.write_output("[WARN] Usage: privacy <guild_id> <true|false>")
             return
 
         g_id_raw, val_raw = args[0], args[1].lower()
         if not g_id_raw.isdigit():
-            print("[ERROR] guild_id must be numeric.")
+            self.write_output("[ERROR] guild_id must be numeric.")
             return
 
         g_id = int(g_id_raw)
@@ -318,19 +402,19 @@ class ConsoleService:
             vis_text = (
                 "Private (Hidden from directory)" if is_private else "Public (Listed in directory)"
             )
-            print(f"[SUCCESS] Guild {g_id} privacy updated to: {vis_text}")
+            self.write_output(f"[SUCCESS] Guild {g_id} privacy updated to: {vis_text}")
         else:
-            print(f"[WARN] No society found registered under Guild ID {g_id}.")
+            self.write_output(f"[WARN] No society found registered under Guild ID {g_id}.")
 
     async def _cmd_token(self, args: list[str]) -> None:
         if not args:
-            print("[WARN] Usage: token <create|list|revoke> [args...]")
+            self.write_output("[WARN] Usage: token <create|list|revoke> [args...]")
             return
 
         sub = args[0].lower()
         if sub == "create":
             if len(args) < 3:
-                print("[WARN] Usage: token create <code> <name> [faculty] [is_private]")
+                self.write_output("[WARN] Usage: token create <code> <name> [faculty] [is_private]")
                 return
             code = args[1].upper()
             name = args[2]
@@ -345,58 +429,66 @@ class ConsoleService:
                 faculty=faculty,
                 is_private=is_private,
             )
-            print("\n========================================================")
-            print(f"🎉 Generated Registration Token: {token}")
-            print(f"• Code:       {code}")
-            print(f"• Name:       {name}")
-            print(f"• Faculty:    {faculty}")
-            print(f"• Visibility: {'Private' if is_private else 'Public'}")
-            print("• Instruction: Give this token to the club president.")
-            print(f"  They run: `/society register token:{token}` in their server!")
-            print("========================================================\n")
+            banner = [
+                "\n========================================================",
+                f"🎉 Generated Registration Token: {token}",
+                f"• Code:       {code}",
+                f"• Name:       {name}",
+                f"• Faculty:    {faculty}",
+                f"• Visibility: {'Private' if is_private else 'Public'}",
+                "• Instruction: Give this token to the club president.",
+                f"  They run: `/society register token:{token}` in their server!",
+                "========================================================\n",
+            ]
+            self.write_output("\n".join(banner))
 
         elif sub == "list":
             status_filter = args[1].upper() if len(args) > 1 else None
             tokens = await self.db.list_society_tokens(status=status_filter)
             if not tokens:
-                print(f"[INFO] No tokens found matching status: {status_filter or 'ALL'}")
+                self.write_output(
+                    f"[INFO] No tokens found matching status: {status_filter or 'ALL'}"
+                )
                 return
 
-            print(f"\n--- Society Registration Tokens ({len(tokens)}) ---")
+            lines = [f"\n--- Society Registration Tokens ({len(tokens)}) ---"]
             for t in tokens:
                 status_badge = f"[{t['status']}]"
                 used_by = (
                     f"Guild {t['used_by_guild_id']}" if t.get("used_by_guild_id") else "Unused"
                 )
-                print(
+                lines.append(
                     f"• {t['token']} {status_badge:<9} | Code: {t['society_code']:<12} | "
                     f"{t['name']:<25} | {used_by}"
                 )
-            print("-----------------------------------------------------")
+            lines.append("-----------------------------------------------------")
+            self.write_output("\n".join(lines))
 
         elif sub == "revoke":
             if len(args) < 2:
-                print("[WARN] Usage: token revoke <token>")
+                self.write_output("[WARN] Usage: token revoke <token>")
                 return
             tok = args[1].strip().upper()
             success = await self.db.revoke_society_token(tok)
             if success:
-                print(f"[SUCCESS] Token {tok} has been revoked.")
+                self.write_output(f"[SUCCESS] Token {tok} has been revoked.")
             else:
-                print(f"[WARN] Token {tok} not found or was not in ACTIVE status.")
+                self.write_output(f"[WARN] Token {tok} not found or was not in ACTIVE status.")
         else:
-            print(f"[WARN] Unknown token subcommand '{sub}'. Use create, list, or revoke.")
+            self.write_output(
+                f"[WARN] Unknown token subcommand '{sub}'. Use create, list, or revoke."
+            )
 
     async def _cmd_applications(self) -> None:
         apps = await self.db.list_society_applications(status="PENDING")
         if not apps:
-            print("[INFO] No pending society applications.")
+            self.write_output("[INFO] No pending society applications.")
             return
 
-        print(f"\n--- Pending Society Applications ({len(apps)}) ---")
+        lines = [f"\n--- Pending Society Applications ({len(apps)}) ---"]
         for a in apps:
             vis = "Private" if a.get("is_private") else "Public"
-            print(
+            lines.append(
                 f"• [ID: {a['id']}] Code: {a['society_code']} | Name: {a['name']} | "
                 f"Faculty: {a['faculty']} | {vis}\n"
                 f"  Requester: {a['applicant_name']} (User ID: {a['applicant_id']}) | "
@@ -404,32 +496,35 @@ class ConsoleService:
                 f"  To approve: approve {a['id']}\n"
                 f"  To reject:  reject {a['id']} [reason]"
             )
-        print("---------------------------------------------------")
+        lines.append("---------------------------------------------------")
+        self.write_output("\n".join(lines))
 
     async def _cmd_approve(self, args: list[str]) -> None:
         if not args:
-            print("[WARN] Usage: approve <application_id>")
+            self.write_output("[WARN] Usage: approve <application_id>")
             return
 
         app_id_raw = args[0]
         if not app_id_raw.isdigit():
-            print("[ERROR] application_id must be numeric.")
+            self.write_output("[ERROR] application_id must be numeric.")
             return
 
         app_id = int(app_id_raw)
         application = await self.db.get_society_application(app_id)
         if not application:
-            print(f"[ERROR] Application ID {app_id} not found.")
+            self.write_output(f"[ERROR] Application ID {app_id} not found.")
             return
 
         if application["status"] != "PENDING":
-            print(f"[WARN] Application ID {app_id} is already {application['status']}.")
+            self.write_output(f"[WARN] Application ID {app_id} is already {application['status']}.")
             return
 
         guild_id = application["guild_id"]
         existing = await self.db.get_society(guild_id)
         if existing:
-            print(f"[ERROR] Guild {guild_id} is already registered as {existing['name']}.")
+            self.write_output(
+                f"[ERROR] Guild {guild_id} is already registered as {existing['name']}."
+            )
             return
 
         try:
@@ -447,12 +542,11 @@ class ConsoleService:
                 reviewer_id=self.bot.user.id if self.bot.user else 0,
                 reason="Approved via host terminal console",
             )
-            print(
+            self.write_output(
                 f"[SUCCESS] Application #{app_id} APPROVED! "
                 f"Society ID {soc_id} provisioned for Guild {guild_id}."
             )
 
-            # Try to notify the guild's system channel
             guild = self.bot.get_guild(guild_id)
             if guild:
                 channel = guild.system_channel or next(
@@ -472,16 +566,16 @@ class ConsoleService:
                     )
                     await channel.send(embed=embed)
         except Exception as e:
-            print(f"[ERROR] Failed to approve application: {e}")
+            self.write_output(f"[ERROR] Failed to approve application: {e}")
 
     async def _cmd_reject(self, args: list[str]) -> None:
         if not args:
-            print("[WARN] Usage: reject <application_id> [reason]")
+            self.write_output("[WARN] Usage: reject <application_id> [reason]")
             return
 
         app_id_raw = args[0]
         if not app_id_raw.isdigit():
-            print("[ERROR] application_id must be numeric.")
+            self.write_output("[ERROR] application_id must be numeric.")
             return
 
         app_id = int(app_id_raw)
@@ -489,7 +583,7 @@ class ConsoleService:
 
         application = await self.db.get_society_application(app_id)
         if not application or application["status"] != "PENDING":
-            print(f"[ERROR] Application ID {app_id} not found or not in PENDING state.")
+            self.write_output(f"[ERROR] Application ID {app_id} not found or not in PENDING state.")
             return
 
         await self.db.resolve_society_application(
@@ -498,9 +592,8 @@ class ConsoleService:
             reviewer_id=self.bot.user.id if self.bot.user else 0,
             reason=reason,
         )
-        print(f"[SUCCESS] Application #{app_id} REJECTED with reason: '{reason}'")
+        self.write_output(f"[SUCCESS] Application #{app_id} REJECTED with reason: '{reason}'")
 
-        # Try to notify applicant
         applicant = self.bot.get_user(application["applicant_id"])
         if applicant:
             try:
@@ -514,34 +607,34 @@ class ConsoleService:
 
     async def _cmd_say(self, args: list[str]) -> None:
         if len(args) < 3:
-            print("[WARN] Usage: say <guild_id> <channel_id> <message>")
+            self.write_output("[WARN] Usage: say <guild_id> <channel_id> <message>")
             return
 
         g_id_raw, c_id_raw = args[0], args[1]
         if not g_id_raw.isdigit() or not c_id_raw.isdigit():
-            print("[ERROR] guild_id and channel_id must be integers.")
+            self.write_output("[ERROR] guild_id and channel_id must be integers.")
             return
 
         guild = self.bot.get_guild(int(g_id_raw))
         if not guild:
-            print(f"[ERROR] Bot is not in guild ID {g_id_raw}.")
+            self.write_output(f"[ERROR] Bot is not in guild ID {g_id_raw}.")
             return
 
         channel = guild.get_channel(int(c_id_raw))
         if not channel or not isinstance(channel, discord.TextChannel):
-            print(f"[ERROR] TextChannel {c_id_raw} not found in guild {guild.name}.")
+            self.write_output(f"[ERROR] TextChannel {c_id_raw} not found in guild {guild.name}.")
             return
 
         msg = " ".join(args[2:])
         try:
             await channel.send(msg)
-            print(f"[SUCCESS] Message sent to #{channel.name} in {guild.name}.")
+            self.write_output(f"[SUCCESS] Message sent to #{channel.name} in {guild.name}.")
         except Exception as e:
-            print(f"[ERROR] Failed to send message: {e}")
+            self.write_output(f"[ERROR] Failed to send message: {e}")
 
     async def _cmd_eval(self, args: list[str]) -> None:
         if not args:
-            print("[WARN] Usage: eval <expression>")
+            self.write_output("[WARN] Usage: eval <expression>")
             return
 
         code = " ".join(args)
@@ -556,11 +649,11 @@ class ConsoleService:
             result = eval(code, scope)
             if asyncio.iscoroutine(result):
                 result = await result
-            print(f"[EVAL] => {result!r}")
+            self.write_output(f"[EVAL] => {result!r}")
         except Exception as e:
-            print(f"[EVAL ERROR] {type(e).__name__}: {e}")
+            self.write_output(f"[EVAL ERROR] {type(e).__name__}: {e}")
 
     async def _cmd_stop(self) -> None:
-        print("[INFO] Shutting down bot gracefully from console...")
+        self.write_output("[INFO] Shutting down bot gracefully from console...")
         self.stop()
         await self.bot.close()
