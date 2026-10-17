@@ -1195,12 +1195,30 @@ class ConsoleService:
                     except Exception as exc:
                         logger.debug("Could not send alert to review channel: %s", exc)
 
-            # Send to connected guilds' system channels
+            # Send to log channels in connected guilds (tarclub-log, tarveri-log, admin-log)
+            # NOTE: Never fall back to system_channel to prevent leaking logs to public chat
+            log_channel_names = {
+                "tarclub-log",
+                "tarclub_log",
+                "tarveri-log",
+                "tarveri_log",
+                "admin-log",
+                "mod-log",
+            }
             for guild in self.bot.guilds:
-                chan = guild.system_channel
+                text_channels = getattr(guild, "text_channels", []) or []
+                chan = next(
+                    (
+                        c
+                        for c in text_channels
+                        if getattr(c, "name", "").lower() in log_channel_names
+                    ),
+                    None,
+                )
                 if chan and isinstance(chan, discord.TextChannel):
-                    perms = chan.permissions_for(guild.me)
-                    if perms.send_messages and perms.embed_links:
+                    bot_member = getattr(guild, "me", None)
+                    perms = chan.permissions_for(bot_member) if bot_member else None
+                    if perms and perms.send_messages and perms.embed_links:
                         try:
                             await chan.send(embed=embed)
                         except Exception as exc:
