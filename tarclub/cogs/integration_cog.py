@@ -102,7 +102,9 @@ class IntegrationCog(commands.GroupCog, group_name="integrate-tarveri"):
         await interaction.response.defer(ephemeral=True)
         import hashlib
 
-        valid, message = IntegrationService.validate_pairing_token(token, interaction.guild.id)
+        valid, message = IntegrationService.validate_pairing_token(
+            token, interaction.guild.id, self.settings.shared_secret
+        )
         if not valid:
             await interaction.followup.send(
                 f"❌ **Pairing Token Rejected:** {message}",

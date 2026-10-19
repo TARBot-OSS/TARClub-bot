@@ -4,7 +4,8 @@ Cross-Bot Integration Service bridging TARClub and TARVeri.
 
 from __future__ import annotations
 
-import base64
+import hashlib
+import hmac
 import logging
 import sqlite3
 import time
@@ -17,20 +18,22 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("tarclub.services.integration")
 
-# Standard TARVeri verified student roles
-TARVERI_STUDENT_ROLE_KEYWORDS = {
-    "student",
+# Exact role names TARVeri assigns to verified students (matched case-insensitively,
+# with an optional "TARUMT " prefix). Guest and organizational roles never match.
+TARVERI_STUDENT_ROLE_NAMES = {
     "verified",
-    "focs",
-    "foet",
     "fafb",
-    "fcci",
-    "fobeh",
-    "fssh",
     "cpus",
-    "degree",
+    "focs",
+    "fcci",
+    "foas",
+    "fobe",
+    "fssh",
+    "foet",
+    "bachelor's degree",
     "diploma",
     "foundation",
+    "postgraduate",
 }
 
 
@@ -43,36 +46,32 @@ class IntegrationService:
         return guild.get_member(tarveri_id) is not None
 
     @staticmethod
-    def validate_pairing_token(token: str, guild_id: int) -> tuple[bool, str]:
+    def validate_pairing_token(token: str, guild_id: int, secret: str) -> tuple[bool, str]:
         """Validate a TARVeri-issued society pairing token for a Discord guild.
 
-        Format: base64(tarveri-bridge:v1:<society_guild_id>:<timestamp>:<sig>)
+        Format: TARV-<society_guild_id>-<timestamp>-<sig>, where sig is the first 32 hex chars of
+        HMAC-SHA256(secret, "<society_guild_id>:<timestamp>"), as in
+        tarveri.config.sign_society_pairing.
         """
-        try:
-            raw_bytes = base64.urlsafe_b64decode(token.strip().encode("utf-8"))
-            decoded = raw_bytes.decode("utf-8")
-            parts = decoded.split(":")
-            if len(parts) != 5:
-                return False, "Invalid token structure (expected 5 segments)."
-            prefix, version, token_guild_str, timestamp_str, sig = parts
-            if prefix != "tarveri-bridge" or version != "v1":
-                return False, f"Unsupported token protocol or version ({prefix}:{version})."
-            if int(token_guild_str) != guild_id:
-                return (
-                    False,
-                    f"Token was issued for guild {token_guild_str}, not this server ({guild_id}).",
-                )
-
-            token_time = int(timestamp_str)
-            # Check token expiration (24h validity window)
-            now = int(time.time())
-            if abs(now - token_time) > 86400:
-                return False, "Token has expired (tokens are valid for 24 hours)."
-            if not sig or len(sig) < 8:
-                return False, "Invalid cryptographic token signature."
-            return True, "Token validated successfully."
-        except Exception as e:
-            return False, f"Failed to decode pairing token: {e}"
+        if not secret:
+            return False, "TARCLUB_SHARED_SECRET is not configured; cannot verify pairing tokens."
+        parts = token.strip().split("-")
+        if len(parts) != 4 or parts[0] != "TARV" or not (parts[1].isdigit() and parts[2].isdigit()):
+            return False, "Invalid token structure (expected TARV-<guild>-<ts>-<signature>)."
+        _, token_guild_str, timestamp_str, sig = parts
+        if int(token_guild_str) != guild_id:
+            return (
+                False,
+                f"Token was issued for guild {token_guild_str}, not this server ({guild_id}).",
+            )
+        expected = hmac.new(
+            secret.encode("utf-8"), f"{token_guild_str}:{timestamp_str}".encode(), hashlib.sha256
+        ).hexdigest()[:32]
+        if not hmac.compare_digest(sig, expected):
+            return False, "Invalid cryptographic token signature."
+        if abs(int(time.time()) - int(timestamp_str)) > 86400:
+            return False, "Token has expired (tokens are valid for 24 hours)."
+        return True, "Token validated successfully."
 
     @staticmethod
     def query_co_located_tarveri_student(
@@ -98,8 +97,8 @@ class IntegrationService:
                 if row:
                     return dict(row)
                 return None
-        except Exception as e:
-            logger.debug("Direct TARVeri SQLite query failed (graceful fallback): %s", e)
+        except sqlite3.Error as e:
+            logger.warning("Direct TARVeri SQLite query failed (schema drift or locked DB?): %s", e)
             return None
 
     @staticmethod
@@ -114,11 +113,9 @@ class IntegrationService:
         Returns: (is_verified, faculty_or_role_name)
         """
         for role in member.roles:
-            role_name_clean = role.name.lower().strip()
-            if any(keyword in role_name_clean for keyword in TARVERI_STUDENT_ROLE_KEYWORDS):
-                # Ensure it's not a guest role
-                if "guest" not in role_name_clean:
-                    return True, role.name
+            role_name_clean = role.name.lower().strip().removeprefix("tarumt ")
+            if role_name_clean in TARVERI_STUDENT_ROLE_NAMES:
+                return True, role.name
 
         if tarveri_db_path:
             db_res = IntegrationService.query_co_located_tarveri_student(tarveri_db_path, member.id)

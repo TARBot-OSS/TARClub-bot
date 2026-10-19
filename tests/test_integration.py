@@ -41,12 +41,19 @@ def test_verify_member_student_status_faculty():
 
     # Case 1: Member with FOCS faculty role
     role_focs = MagicMock()
-    role_focs.name = "FOCS Student"
+    role_focs.name = "FOCS"
     member.roles = [role_focs]
 
     is_verified, role_name = IntegrationService.verify_member_student_status(member)
     assert is_verified is True
-    assert role_name == "FOCS Student"
+    assert role_name == "FOCS"
+
+    # Case 1b: Organizational look-alike roles must not count as verified
+    role_council = MagicMock()
+    role_council.name = "Student Council"
+    member.roles = [role_council]
+    assert IntegrationService.verify_member_student_status(member)[0] is False
+    member.roles = [role_focs]
 
     # Case 2: Member with Guest role should NOT be verified as student
     role_guest = MagicMock()
@@ -79,33 +86,47 @@ async def test_integration_db_persistence(db: Database):
     assert unlocked_state["enforce_student_verification"] == 0
 
 
+def _signed_token(guild_id: int, ts: int, secret: str) -> str:
+    import hashlib
+    import hmac
+
+    sig = hmac.new(secret.encode(), f"{guild_id}:{ts}".encode(), hashlib.sha256).hexdigest()[:32]
+    return f"TARV-{guild_id}-{ts}-{sig}"
+
+
 def test_pairing_token_validation():
-    import base64
     import time
 
     guild_id = 1234567890
+    secret = "s3cret"
     now = int(time.time())
-    valid_payload = f"tarveri-bridge:v1:{guild_id}:{now}:abcdef123456"
-    valid_token = base64.urlsafe_b64encode(valid_payload.encode("utf-8")).decode("utf-8")
+    valid_token = _signed_token(guild_id, now, secret)
 
-    ok, msg = IntegrationService.validate_pairing_token(valid_token, guild_id)
+    ok, msg = IntegrationService.validate_pairing_token(valid_token, guild_id, secret)
     assert ok is True
     assert "successfully" in msg
 
     # Mismatched guild
-    ok, err = IntegrationService.validate_pairing_token(valid_token, 9999999999)
+    ok, err = IntegrationService.validate_pairing_token(valid_token, 9999999999, secret)
     assert ok is False
     assert "not this server" in err
 
+    # Forged signature (wrong secret) and unconfigured secret
+    ok, err = IntegrationService.validate_pairing_token(valid_token, guild_id, "other")
+    assert ok is False
+    assert "signature" in err
+    ok, err = IntegrationService.validate_pairing_token(valid_token, guild_id, "")
+    assert ok is False
+    assert "not configured" in err
+
     # Expired token
-    old_payload = f"tarveri-bridge:v1:{guild_id}:{now - 100000}:abcdef123456"
-    old_token = base64.urlsafe_b64encode(old_payload.encode("utf-8")).decode("utf-8")
-    ok, err = IntegrationService.validate_pairing_token(old_token, guild_id)
+    old_token = _signed_token(guild_id, now - 100000, secret)
+    ok, err = IntegrationService.validate_pairing_token(old_token, guild_id, secret)
     assert ok is False
     assert "expired" in err
 
     # Invalid token format
-    ok, err = IntegrationService.validate_pairing_token("not-a-valid-token", guild_id)
+    ok, err = IntegrationService.validate_pairing_token("not-a-valid-token", guild_id, secret)
     assert ok is False
 
 
