@@ -108,6 +108,13 @@ class IntegrationCog(commands.GroupCog, group_name="integrate-tarveri"):
             token, interaction.guild.id, self.settings.shared_secret
         )
         if not valid:
+            logger.warning(
+                "TARVeri bridge link rejected for '%s' (%s) by %s: %s",
+                interaction.guild.name,
+                interaction.guild_id,
+                interaction.user,
+                message,
+            )
             await interaction.followup.send(
                 f"❌ **Pairing Token Rejected:** {message}",
                 ephemeral=True,
@@ -120,6 +127,12 @@ class IntegrationCog(commands.GroupCog, group_name="integrate-tarveri"):
             is_linked=True,
             enforce_student=True,
             shared_secret_hash=token_hash,
+        )
+        logger.info(
+            "TARVeri bridge linked for '%s' (%s) by %s",
+            interaction.guild.name,
+            interaction.guild_id,
+            interaction.user,
         )
 
         embed = discord.Embed(
