@@ -3,7 +3,41 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 import pytest
 
-from tarclub.cogs.term_cog import can_confirm_handover, grant_alumni_roles
+from tarclub.cogs.term_cog import alumni_grant_blocker, can_confirm_handover, grant_alumni_roles
+
+
+def _guild_with_bot(manage_roles: bool, bot_position: int, roles: list) -> MagicMock:
+    guild = MagicMock(spec=discord.Guild)
+    guild.roles = roles
+    guild.me = MagicMock()
+    guild.me.guild_permissions.manage_roles = manage_roles
+    guild.me.top_role.position = bot_position
+    return guild
+
+
+def test_blocker_when_bot_lacks_manage_roles():
+    guild = _guild_with_bot(manage_roles=False, bot_position=10, roles=[])
+
+    assert "Manage Roles" in alumni_grant_blocker(guild, "2025/2026")
+
+
+def test_blocker_when_existing_alumni_role_is_above_bot():
+    alumni = MagicMock(spec=discord.Role)
+    alumni.name = "Alumni Exco (2025/2026)"
+    alumni.position = 12
+    guild = _guild_with_bot(manage_roles=True, bot_position=10, roles=[alumni])
+
+    assert "Move the bot's role" in alumni_grant_blocker(guild, "2025/2026")
+
+
+def test_no_blocker_when_bot_can_grant():
+    alumni = MagicMock(spec=discord.Role)
+    alumni.name = "Alumni Exco (2025/2026)"
+    alumni.position = 5
+    guild = _guild_with_bot(manage_roles=True, bot_position=10, roles=[alumni])
+
+    assert alumni_grant_blocker(guild, "2025/2026") is None
+    assert alumni_grant_blocker(_guild_with_bot(True, 10, []), "2025/2026") is None
 
 
 def test_only_incoming_chair_or_owner_can_confirm():

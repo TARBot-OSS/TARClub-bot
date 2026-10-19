@@ -20,6 +20,16 @@ def can_confirm_handover(user_id: int, pending: dict, owner_id: int) -> bool:
     return user_id in (pending["incoming_chair_id"], owner_id)
 
 
+def alumni_grant_blocker(guild: discord.Guild, academic_year: str) -> str | None:
+    me = guild.me
+    if me is None or not me.guild_permissions.manage_roles:
+        return "The bot needs the Manage Roles permission to grant Alumni roles."
+    role = discord.utils.get(guild.roles, name=f"Alumni Exco ({academic_year})")
+    if role is not None and role.position >= me.top_role.position:
+        return f"Move the bot's role above `{role.name}` in Server Settings, then confirm again."
+    return None
+
+
 async def grant_alumni_roles(
     guild: discord.Guild, academic_year: str, member_ids: list[int]
 ) -> tuple[int, int]:
@@ -216,6 +226,11 @@ class TermCog(commands.GroupCog, group_name="term"):
                 "Run `/term cancel-handover` and propose again.",
                 ephemeral=True,
             )
+            return
+
+        blocker = alumni_grant_blocker(interaction.guild, active_term["academic_year"])
+        if blocker:
+            await interaction.followup.send(f"❌ {blocker} Nothing was changed.", ephemeral=True)
             return
 
         roster = await self.db.get_active_roster(society["id"])
