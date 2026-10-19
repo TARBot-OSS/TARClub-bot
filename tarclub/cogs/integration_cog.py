@@ -4,6 +4,7 @@ TARVeri Cross-Bot Integration Cog for TARClub.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import discord
@@ -12,6 +13,7 @@ from discord.ext import commands
 
 from tarclub.config import Settings
 from tarclub.database import Database
+from tarclub.embeds import add_line_fields
 from tarclub.services.integration_service import IntegrationService
 
 logger = logging.getLogger("tarclub.cogs.integration")
@@ -158,6 +160,17 @@ class IntegrationCog(commands.GroupCog, group_name="integrate-tarveri"):
             )
             return
 
+        member_ids = [
+            item["user_id"]
+            for item in roster
+            if item.get("user_id") and interaction.guild.get_member(item["user_id"]) is not None
+        ]
+        tarveri_rows = await asyncio.to_thread(
+            IntegrationService.query_co_located_tarveri_students,
+            self.settings.tarveri_db_path,
+            member_ids,
+        )
+
         total_positions = len(roster)
         filled_count = 0
         verified_count = 0
@@ -183,8 +196,7 @@ class IntegrationCog(commands.GroupCog, group_name="integrate-tarveri"):
                 continue
 
             is_verified, role_or_fac = IntegrationService.verify_member_student_status(
-                member,
-                tarveri_db_path=self.settings.tarveri_db_path,
+                member, tarveri_rows
             )
             dept = item.get("department", "")
             if is_verified:
@@ -212,25 +224,11 @@ class IntegrationCog(commands.GroupCog, group_name="integrate-tarveri"):
             color=status_color,
         )
 
-        chunk = ""
-        field_num = 1
-        for line in breakdown_lines:
-            if len(chunk) + len(line) + 1 > 1000:
-                embed.add_field(name=f"Roster Audit (Part {field_num})", value=chunk, inline=False)
-                chunk = line + "\n"
-                field_num += 1
-            else:
-                chunk += line + "\n"
-        if chunk:
-            embed.add_field(
-                name="Roster Verification Status"
-                if field_num == 1
-                else f"Roster Audit (Part {field_num})",
-                value=chunk,
-                inline=False,
-            )
-
-        embed.set_footer(text="TARVeri & TARClub Cross-Bot Integration • TARBot-OSS")
+        complete = add_line_fields(embed, "Roster Verification Status", breakdown_lines)
+        footer = "TARVeri & TARClub Cross-Bot Integration • TARBot-OSS"
+        if not complete:
+            footer += " • Roster truncated to fit Discord embed limits"
+        embed.set_footer(text=footer)
         await interaction.followup.send(embed=embed)
 
     @commands.Cog.listener()

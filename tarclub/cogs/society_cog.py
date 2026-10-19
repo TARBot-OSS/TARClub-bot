@@ -11,6 +11,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from tarclub.database import Database
+from tarclub.embeds import add_line_fields
 
 logger = logging.getLogger("tarclub.cogs.society")
 
@@ -392,14 +393,15 @@ class SocietyCog(commands.GroupCog, group_name="society"):
             entry = f"• {badge} **{s['name']}** (`{s['society_code']}`)"
             faculties.setdefault(fac, []).append(entry)
 
+        complete = True
         for fac_name, entries in faculties.items():
-            embed.add_field(
-                name=f"Faculty / Group: {fac_name}",
-                value="\n".join(entries),
-                inline=False,
-            )
+            if not add_line_fields(embed, f"Faculty / Group: {fac_name}", entries):
+                complete = False
 
-        embed.set_footer(text="TARClub Multi-Tenant Society Engine • TARBot-OSS")
+        footer = "TARClub Multi-Tenant Society Engine • TARBot-OSS"
+        if not complete:
+            footer += " • Directory truncated to fit Discord embed limits"
+        embed.set_footer(text=footer)
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(

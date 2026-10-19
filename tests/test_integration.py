@@ -159,28 +159,22 @@ def test_co_located_tarveri_student_query(tmp_path: Path):
         )
         conn.commit()
 
-    # Query existing user
-    res = IntegrationService.query_co_located_tarveri_student(tarveri_db, 11223344)
-    assert res is not None
-    assert res["faculty_code"] == "FOCS"
-    assert res["campus_code"] == "W"
+    # Batch query returns only existing users, keyed by Discord ID
+    rows = IntegrationService.query_co_located_tarveri_students(tarveri_db, [11223344, 99999999])
+    assert set(rows) == {11223344}
+    assert rows[11223344]["faculty_code"] == "FOCS"
+    assert rows[11223344]["campus_code"] == "W"
 
-    # Query non-existing user
-    none_res = IntegrationService.query_co_located_tarveri_student(tarveri_db, 99999999)
-    assert none_res is None
+    assert IntegrationService.query_co_located_tarveri_students(tarveri_db, []) == {}
 
-    # Query with missing db file
-    missing_res = IntegrationService.query_co_located_tarveri_student(
-        tmp_path / "missing.db", 11223344
-    )
-    assert missing_res is None
+    # Missing db file yields no rows instead of raising
+    missing = tmp_path / "missing.db"
+    assert IntegrationService.query_co_located_tarveri_students(missing, [11223344]) == {}
 
-    # Test member status via co-located DB fallback
+    # Test member status via pre-fetched co-located rows
     member_mock = MagicMock()
     member_mock.id = 11223344
     member_mock.roles = []  # No discord roles
-    is_v, label = IntegrationService.verify_member_student_status(
-        member_mock, tarveri_db_path=tarveri_db
-    )
+    is_v, label = IntegrationService.verify_member_student_status(member_mock, rows)
     assert is_v is True
     assert "FOCS" in str(label)

@@ -9,6 +9,7 @@ import hmac
 import logging
 import sqlite3
 import time
+from collections.abc import Collection, Mapping
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -74,42 +75,42 @@ class IntegrationService:
         return True, "Token validated successfully."
 
     @staticmethod
-    def query_co_located_tarveri_student(
-        tarveri_db_path: Path, discord_id: int
-    ) -> dict[str, Any] | None:
-        """Query TARVeri SQLite database in read-only mode if co-located on the same filesystem."""
+    def query_co_located_tarveri_students(
+        tarveri_db_path: Path | None, discord_ids: Collection[int]
+    ) -> dict[int, dict[str, Any]]:
+        """Batch-read co-located TARVeri rows by Discord ID. Blocking: use asyncio.to_thread."""
+        if not discord_ids or tarveri_db_path is None:
+            return {}
         if not tarveri_db_path.exists() or not tarveri_db_path.is_file():
-            return None
+            return {}
+        ids = list(discord_ids)
+        placeholders = ",".join("?" * len(ids))
         try:
             uri = f"file:{tarveri_db_path.resolve()}?mode=ro"
             with sqlite3.connect(uri, uri=True, timeout=5.0) as conn:
                 conn.row_factory = sqlite3.Row
-                cursor = conn.execute(
-                    """
+                rows = conn.execute(
+                    f"""
                     SELECT discord_user_id, faculty_code, campus_code, level_code,
                            programme_code, is_alumni, card_expiry_date, verified_at
                     FROM verifications
-                    WHERE discord_user_id = ?;
+                    WHERE discord_user_id IN ({placeholders});
                     """,
-                    (discord_id,),
-                )
-                row = cursor.fetchone()
-                if row:
-                    return dict(row)
-                return None
+                    ids,
+                ).fetchall()
+                return {row["discord_user_id"]: dict(row) for row in rows}
         except sqlite3.Error as e:
             logger.warning("Direct TARVeri SQLite query failed (schema drift or locked DB?): %s", e)
-            return None
+            return {}
 
     @staticmethod
     def verify_member_student_status(
         member: discord.Member,
-        tarveri_db_path: Path | None = None,
+        tarveri_rows: Mapping[int, dict[str, Any]] | None = None,
     ) -> tuple[bool, str | None]:
-        """Verify whether a Discord member has been verified as a student by TARVeri.
+        """Verify whether a Discord member is a TARVeri-verified student.
 
-        1. Checks member roles against TARVeri faculty and student role indicators.
-        2. If not found and tarveri_db_path is configured and readable, queries co-located DB.
+        Checks member roles first, then the pre-fetched co-located TARVeri rows keyed by Discord ID.
         Returns: (is_verified, faculty_or_role_name)
         """
         for role in member.roles:
@@ -117,10 +118,9 @@ class IntegrationService:
             if role_name_clean in TARVERI_STUDENT_ROLE_NAMES:
                 return True, role.name
 
-        if tarveri_db_path:
-            db_res = IntegrationService.query_co_located_tarveri_student(tarveri_db_path, member.id)
-            if db_res:
-                fac = db_res.get("faculty_code") or "TAR UMT Student"
-                return True, f"DB Verified ({fac})"
+        db_res = tarveri_rows.get(member.id) if tarveri_rows else None
+        if db_res:
+            fac = db_res.get("faculty_code") or "TAR UMT Student"
+            return True, f"DB Verified ({fac})"
 
         return False, None

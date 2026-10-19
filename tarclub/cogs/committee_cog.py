@@ -4,6 +4,7 @@ Committee roster and position management Cog for TARClub.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING
 
@@ -12,6 +13,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from tarclub.database import Database
+from tarclub.embeds import add_line_fields
 from tarclub.services.integration_service import IntegrationService
 from tarclub.services.rbac_service import SocietyPermission, has_permission
 
@@ -133,18 +135,18 @@ class CommitteeCog(commands.GroupCog, group_name="committee"):
             "OTHER": "📌 Additional Positions",
         }
 
+        complete = True
         for dept_key, items in departments.items():
-            if items:
-                embed.add_field(
-                    name=dept_labels[dept_key],
-                    value="\n".join(items),
-                    inline=False,
-                )
+            if items and not add_line_fields(embed, dept_labels[dept_key], items):
+                complete = False
 
         if society.get("banner_url"):
             embed.set_image(url=society["banner_url"])
 
-        embed.set_footer(text=f"Total Positions: {len(roster_data)} • TARClub Governance")
+        footer = f"Total Positions: {len(roster_data)} • TARClub Governance"
+        if not complete:
+            footer += " • Roster truncated to fit Discord embed limits"
+        embed.set_footer(text=footer)
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="assign", description="Assign a member to a committee position.")
@@ -196,8 +198,11 @@ class CommitteeCog(commands.GroupCog, group_name="committee"):
         )
         settings = getattr(self.bot, "settings", None)
         tarveri_db = getattr(settings, "tarveri_db_path", None)
+        tarveri_rows = await asyncio.to_thread(
+            IntegrationService.query_co_located_tarveri_students, tarveri_db, [member.id]
+        )
         is_verified, role_label = IntegrationService.verify_member_student_status(
-            member, tarveri_db_path=tarveri_db
+            member, tarveri_rows
         )
 
         is_normal_member = (
