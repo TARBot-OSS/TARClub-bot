@@ -139,7 +139,7 @@ CREATE TABLE IF NOT EXISTS positions (
     society_id INTEGER NOT NULL,
     title TEXT NOT NULL,                    -- e.g. "Chairperson", "Art & Promotion Director"
     department TEXT NOT NULL,               -- "PRESIDIUM", "SECRETARIAT", "FINANCE", "DIRECTORSHIP"
-    hierarchy_order INTEGER NOT NULL,       -- 1 = Chairperson (Highest), 14 = Auditor
+    hierarchy_order INTEGER NOT NULL,       -- 1 = Chairperson (Highest), 15 = General Member
     discord_role_id INTEGER,                -- Linked Discord Role ID (auto-created)
     rbac_flags INTEGER NOT NULL DEFAULT 0,  -- Bitwise RBAC permissions
     is_template BOOLEAN DEFAULT 0,          -- 1 if default template, 0 if custom
@@ -175,7 +175,7 @@ CREATE TABLE IF NOT EXISTS tarveri_integrations (
 
 ---
 
-## 👥 Standard 14-Role Starter Template & Default Hierarchy
+## 👥 Standard 15-Role Starter Template & Default Hierarchy
 
 Every newly registered society automatically receives the standard TAR UMT club organizational hierarchy. Committees can rename, add, remove, or modify positions at any time.
 
@@ -303,8 +303,8 @@ sequenceDiagram
 ```
 
 ### Handover Safety Guards
-1. **Two-Person Quorum**: Handover requires confirmation from both Outgoing Chairperson and Incoming Chairperson (or Server Owner).
-2. **Alumni Preservation**: Outgoing members are never abruptly stripped of all recognition; they automatically receive `@Alumni Exco [Term]` with honorary permissions.
+1. **Two-Person Quorum** (implemented): `/term handover` proposes the handover; a different member with `MANAGE_TERMS` or the Server Owner runs `/term confirm-handover`. `/term cancel-handover` clears a pending proposal. Only one proposal may be pending per society. Not yet implemented: the spec's check that the confirmer is the incoming chairperson, because the incoming roster is not stored.
+2. **Alumni Preservation** (not yet implemented): The spec calls for outgoing members to receive `@Alumni Exco [Term]`. The current handover updates the database and posts the proclamation only; Discord roles are not changed.
 3. **Audit Trail**: Generates a tamper-proof markdown/PDF record of the completed term's tenure.
 
 ---
@@ -330,6 +330,8 @@ For multi-server setups (where TARVeri is on the main Campus Hub and TARClub is 
   -> Handshake established and stored in `tarveri_integrations`.
 
 ### 3. Verification Validation API (Local REST / IPC / Direct SQLite Read)
+
+Implemented today: direct read-only SQLite lookup of TARVeri's `verifications` table, batched by Discord ID (`IntegrationService.query_co_located_tarveri_students`). The REST/IPC endpoint below is a planned design and is not built.
 
 #### Local Unix Socket / Loopback REST Endpoint:
 `GET /api/v1/tarveri/student?user_id=123456789012345678`

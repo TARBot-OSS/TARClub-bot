@@ -15,7 +15,7 @@
 - **Dynamic Theming Engine**: Custom primary/secondary hex colors, branded Discord roles, banner assets, custom emojis, and embed footers per society.
 - **15-Role Starter Template & Hierarchy**: Pre-loaded TAR UMT standard club hierarchy (Chairperson down to General Member) that committees can dynamically customize or expand.
 - **Granular Bitwise RBAC**: 15 fine-grained permissions controlling announcements, event scheduling, budget requests, audit trails, and member assignments.
-- **Annual Committee Term Handover**: Two-step quorum handover wizard that smoothly transitions active committees to `@Alumni Exco (Term)` and installs incoming teams.
+- **Annual Committee Term Handover**: Two-person handover. One committee member runs `/term handover` to propose it, and a second member with `MANAGE_TERMS` (or the server owner) runs `/term confirm-handover` to archive the outgoing term and activate the incoming one. Discord role changes (such as `@Alumni Exco`) are not yet automated.
 - **Cross-Bot Bridge with TARVeri**: Co-location auto-discovery and eligibility checks ensuring only verified TAR UMT students hold executive committee seats.
 
 ---
