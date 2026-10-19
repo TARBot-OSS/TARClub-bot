@@ -85,7 +85,7 @@ class TermCog(commands.GroupCog, group_name="term"):
 
     @app_commands.command(
         name="handover",
-        description="Execute annual committee handover to the incoming academic term.",
+        description="Propose the annual committee handover; a second member must confirm it.",
     )
     @app_commands.describe(
         next_term="Incoming Academic Year (e.g. 2026/2027)",
@@ -116,14 +116,115 @@ class TermCog(commands.GroupCog, group_name="term"):
             await interaction.followup.send("❌ No active term to handover from.", ephemeral=True)
             return
 
-        current_term_name = active_term["term_name"]
-        new_term_id = await self.db.handover_term(
+        if await self.db.get_pending_handover(society["id"]):
+            await interaction.followup.send(
+                "⏳ A handover is already pending. Ask a second committee member to run "
+                "`/term confirm-handover`, or run `/term cancel-handover`.",
+                ephemeral=True,
+            )
+            return
+
+        await self.db.propose_handover(
             society_id=society["id"],
             current_term_id=active_term["id"],
             next_academic_year=next_term.strip(),
             handover_notes=notes,
+            proposed_by=interaction.user.id,
+        )
+        await interaction.followup.send(
+            f"📝 Handover to `Term {next_term.strip()}` proposed. A different committee member "
+            "with `MANAGE_TERMS` (or the server owner) must run `/term confirm-handover`.",
         )
 
+    @app_commands.command(
+        name="confirm-handover",
+        description="Confirm a pending handover as the second committee member.",
+    )
+    async def confirm_handover(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            return
+
+        await interaction.response.defer(ephemeral=False)
+        society, authorized = await self._check_permission(
+            interaction, SocietyPermission.MANAGE_TERMS
+        )
+        if not society or not authorized:
+            await interaction.followup.send(
+                "❌ You do not have permission to confirm term handovers (`MANAGE_TERMS`).",
+                ephemeral=True,
+            )
+            return
+
+        pending = await self.db.get_pending_handover(society["id"])
+        if not pending:
+            await interaction.followup.send("❌ No handover is pending.", ephemeral=True)
+            return
+        if pending["proposed_by"] == interaction.user.id:
+            await interaction.followup.send(
+                "❌ The proposer cannot confirm their own handover. "
+                "A second committee member must.",
+                ephemeral=True,
+            )
+            return
+
+        active_term = await self.db.get_active_term(society["id"])
+        if not active_term or active_term["id"] != pending["current_term_id"]:
+            await interaction.followup.send(
+                "❌ The active term changed after this handover was proposed. "
+                "Run `/term cancel-handover` and propose again.",
+                ephemeral=True,
+            )
+            return
+
+        new_term_id = await self.db.confirm_handover(society["id"], interaction.user.id)
+        if new_term_id is None:
+            await interaction.followup.send(
+                "❌ This handover was already resolved. Check `/term history`.", ephemeral=True
+            )
+            return
+
+        await self._send_proclamation(
+            interaction,
+            society,
+            concluded_term_name=active_term["term_name"],
+            next_academic_year=pending["next_academic_year"],
+            new_term_id=new_term_id,
+            notes=pending["handover_notes"],
+        )
+
+    @app_commands.command(
+        name="cancel-handover",
+        description="Cancel the pending committee handover.",
+    )
+    async def cancel_handover(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        society, authorized = await self._check_permission(
+            interaction, SocietyPermission.MANAGE_TERMS
+        )
+        if not society or not authorized:
+            await interaction.followup.send(
+                "❌ You do not have permission to cancel term handovers (`MANAGE_TERMS`).",
+                ephemeral=True,
+            )
+            return
+
+        cancelled = await self.db.cancel_handover(society["id"], interaction.user.id)
+        message = "🛑 Pending handover cancelled." if cancelled else "❌ No handover is pending."
+        await interaction.followup.send(message, ephemeral=True)
+
+    async def _send_proclamation(
+        self,
+        interaction: discord.Interaction,
+        society: dict,
+        *,
+        concluded_term_name: str,
+        next_academic_year: str,
+        new_term_id: int,
+        notes: str | None,
+    ) -> None:
         color_val = 0x1E88E5
         try:
             color_val = int(society["primary_color"].lstrip("#"), 16)
@@ -135,8 +236,8 @@ class TermCog(commands.GroupCog, group_name="term"):
             title=f"🎉 Annual Handover Proclamation — {soc_name}",
             description=(
                 f"The executive governance of **{soc_name}** has transitioned!\n\n"
-                f"📁 **Concluded Tenure:** `{current_term_name}` (Archived)\n"
-                f"✨ **Incoming Tenure:** `Term {next_term.strip()}` "
+                f"📁 **Concluded Tenure:** `{concluded_term_name}` (Archived)\n"
+                f"✨ **Incoming Tenure:** `Term {next_academic_year}` "
                 f"(Active, ID: {new_term_id})\n\n"
                 f"**Remarks:** {notes or 'Official AGM Handover.'}\n\n"
                 "👑 *Outgoing committee members are now recognized as Alumni Exco.*"

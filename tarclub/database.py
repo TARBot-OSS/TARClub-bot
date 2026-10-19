@@ -180,6 +180,22 @@ class Database(DatabaseBase):
                 added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 added_by TEXT
             );
+
+            -- 10. Term handover requests awaiting a second committee confirmation
+            CREATE TABLE IF NOT EXISTS term_handover_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                society_id INTEGER NOT NULL REFERENCES societies(id),
+                current_term_id INTEGER NOT NULL REFERENCES terms(id),
+                next_academic_year TEXT NOT NULL,
+                handover_notes TEXT,
+                proposed_by INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'PENDING',
+                resolved_by INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                resolved_at TIMESTAMP
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_handover_one_pending
+                ON term_handover_requests(society_id) WHERE status = 'PENDING';
             """
         )
         # Ensure is_private column exists in societies
@@ -513,6 +529,82 @@ class Database(DatabaseBase):
         row = await cursor.fetchone()
         await self.conn.commit()
         return row[0]
+
+    async def get_pending_handover(self, society_id: int) -> dict[str, Any] | None:
+        cursor = await self.conn.execute(
+            "SELECT * FROM term_handover_requests WHERE society_id = ? AND status = 'PENDING';",
+            (society_id,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def propose_handover(
+        self,
+        society_id: int,
+        current_term_id: int,
+        next_academic_year: str,
+        handover_notes: str | None,
+        proposed_by: int,
+    ) -> int:
+        """Open a pending handover. Raises sqlite3.IntegrityError if one is already pending."""
+        try:
+            cursor = await self.conn.execute(
+                """
+                INSERT INTO term_handover_requests
+                    (society_id, current_term_id, next_academic_year, handover_notes, proposed_by)
+                VALUES (?, ?, ?, ?, ?)
+                RETURNING id;
+                """,
+                (society_id, current_term_id, next_academic_year, handover_notes, proposed_by),
+            )
+            row = await cursor.fetchone()
+            await self.conn.commit()
+        except Exception:
+            await self.conn.rollback()
+            raise
+        return row[0]
+
+    async def confirm_handover(self, society_id: int, confirmed_by: int) -> int | None:
+        """Confirm the pending handover as a second person and execute it.
+
+        Returns the new term id, or None when nothing is pending or the proposer
+        is confirming their own request.
+        """
+        try:
+            cursor = await self.conn.execute(
+                """
+                UPDATE term_handover_requests
+                SET status = 'CONFIRMED', resolved_by = ?, resolved_at = CURRENT_TIMESTAMP
+                WHERE society_id = ? AND status = 'PENDING' AND proposed_by != ?
+                RETURNING current_term_id, next_academic_year, handover_notes;
+                """,
+                (confirmed_by, society_id, confirmed_by),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                await self.conn.rollback()
+                return None
+            return await self.handover_term(
+                society_id=society_id,
+                current_term_id=row["current_term_id"],
+                next_academic_year=row["next_academic_year"],
+                handover_notes=row["handover_notes"],
+            )
+        except Exception:
+            await self.conn.rollback()
+            raise
+
+    async def cancel_handover(self, society_id: int, cancelled_by: int) -> bool:
+        cursor = await self.conn.execute(
+            """
+            UPDATE term_handover_requests
+            SET status = 'CANCELLED', resolved_by = ?, resolved_at = CURRENT_TIMESTAMP
+            WHERE society_id = ? AND status = 'PENDING';
+            """,
+            (cancelled_by, society_id),
+        )
+        await self.conn.commit()
+        return cursor.rowcount > 0
 
     async def get_term_history(self, society_id: int) -> list[dict[str, Any]]:
         """Fetch all terms past and present for a society."""
