@@ -93,4 +93,6 @@ python -m tarclub
 
 When both **TARVeri** and **TARClub** are present in the same Discord server, TARClub automatically bridges with TARVeri's student verification registry to ensure candidate eligibility for committee positions.
 
+Setup steps (shared secret, pairing token, `/integrate-tarveri link`): see [TARVeri society bridge guide](https://github.com/TARBot-OSS/TARVeri-bot/blob/main/docs/society-bridge.md).
+
 For architectural and runbook details, see [`.agents/skills/tarclub-society/SKILL.md`](.agents/skills/tarclub-society/SKILL.md).
