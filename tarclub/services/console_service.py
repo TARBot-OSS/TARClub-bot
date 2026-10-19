@@ -199,9 +199,14 @@ class ConsoleService(ConsoleCore):
             return False
         return True
 
+    def attach_log_capture(self) -> None:
+        self._before_start()
+
     def _before_start(self) -> None:
         # Attach ConsoleAwareStreamHandler to root and tarclub loggers,
         # and ensure file handler records logs
+        if any(isinstance(h, ConsoleAwareStreamHandler) for h in logging.getLogger().handlers):
+            return
         try:
             from logging.handlers import RotatingFileHandler
 

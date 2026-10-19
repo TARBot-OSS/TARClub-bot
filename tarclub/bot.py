@@ -37,6 +37,7 @@ class TARClubBot(commands.Bot):
         self.settings = settings
         self.db = db
         self.console_service = ConsoleService(self, self.db, self.settings)
+        self.console_service.attach_log_capture()
 
     async def setup_hook(self) -> None:
         """Initialize database, register persistent views, and load cogs."""
