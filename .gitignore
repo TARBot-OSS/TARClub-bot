@@ -33,3 +33,6 @@ Thumbs.db
 .ruff_cache/
 .coverage
 htmlcov/
+
+# Updater snapshots
+backups/
