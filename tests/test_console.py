@@ -470,7 +470,7 @@ async def test_console_service_session_timeout(mock_bot, db: Database):
     """Ensure console session times out after 5 minutes of inactivity and auto-locks."""
     import time
 
-    settings = MagicMock(spec=Settings, console_session_timeout=300.0)
+    settings = MagicMock(spec=Settings, console_session_timeout=300.0, database_path=":memory:")
     console = ConsoleService(mock_bot, db, settings)
     console.is_authenticated = True
     console.authenticated_user = "admin"
