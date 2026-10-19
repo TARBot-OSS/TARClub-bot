@@ -670,6 +670,18 @@ class Database(DatabaseBase):
         )
         await self.conn.commit()
 
+    async def set_enforce_student(self, guild_id: int, enabled: bool) -> None:
+        await self.conn.execute(
+            """
+            INSERT INTO tarveri_integrations (guild_id, enforce_student_verification)
+            VALUES (?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET
+                enforce_student_verification = excluded.enforce_student_verification;
+            """,
+            (guild_id, 1 if enabled else 0),
+        )
+        await self.conn.commit()
+
     async def set_society_privacy(self, guild_id: int, is_private: bool) -> bool:
         """Toggle public/private visibility status of a society."""
         cursor = await self.conn.execute(

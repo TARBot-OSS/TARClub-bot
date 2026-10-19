@@ -47,6 +47,11 @@ class IntegrationService:
         return guild.get_member(tarveri_id) is not None
 
     @staticmethod
+    def is_bridge_paired(integration: dict[str, Any] | None) -> bool:
+        """A society is paired only once a TARVeri pairing token has been redeemed."""
+        return bool(integration and integration.get("shared_secret_hash"))
+
+    @staticmethod
     def validate_pairing_token(token: str, guild_id: int, secret: str) -> tuple[bool, str]:
         """Validate a TARVeri-issued society pairing token for a Discord guild.
 

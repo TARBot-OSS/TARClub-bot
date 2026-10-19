@@ -42,21 +42,25 @@ class IntegrationCog(commands.GroupCog, group_name="integrate-tarveri"):
         )
         integration = await self.db.get_integration(interaction.guild_id)
 
-        is_linked = bool(integration and integration.get("is_linked")) or tarveri_present
+        is_paired = IntegrationService.is_bridge_paired(integration)
         enforce = bool(integration.get("enforce_student_verification", 1)) if integration else True
 
         embed = discord.Embed(
             title="🔗 TARVeri Cross-Bot Integration Status",
-            color=0x00E676 if is_linked else 0xFF9800,
+            color=0x00E676 if is_paired else 0xFF9800,
         )
         embed.add_field(
-            name="🤖 TARVeri Bot Detection",
-            value="🟢 **Detected in Server**" if tarveri_present else "⚪ *Not in this server*",
+            name="🤖 TARVeri Bot Presence",
+            value=(
+                "🟢 **In this server** *(online status not checked)*"
+                if tarveri_present
+                else "⚪ *Not in this server*"
+            ),
             inline=True,
         )
         embed.add_field(
             name="🤝 Bridge State",
-            value="🟢 **ACTIVE & PAIRED**" if is_linked else "⚪ *Unlinked*",
+            value="🟢 **ACTIVE & PAIRED**" if is_paired else "⚪ *Not paired*",
             inline=True,
         )
         embed.add_field(
@@ -79,11 +83,7 @@ class IntegrationCog(commands.GroupCog, group_name="integrate-tarveri"):
             return
 
         await interaction.response.defer(ephemeral=True)
-        await self.db.set_integration(
-            guild_id=interaction.guild_id,
-            is_linked=True,
-            enforce_student=enabled,
-        )
+        await self.db.set_enforce_student(interaction.guild_id, enabled)
 
         status_text = "ENFORCED (Verified Students Only)" if enabled else "DISABLED (Open to all)"
         await interaction.followup.send(
@@ -249,14 +249,9 @@ class IntegrationCog(commands.GroupCog, group_name="integrate-tarveri"):
         """Auto-detect TARVeri bot joining the server and activate the bridge."""
         if member.id == self.settings.tarveri_bot_id:
             logger.info(
-                "TARVeri bot joined guild %s (%s). Activating bridge.",
+                "TARVeri bot joined guild %s (%s). Bridge stays inactive until paired.",
                 member.guild.name,
                 member.guild.id,
-            )
-            await self.db.set_integration(
-                guild_id=member.guild.id,
-                is_linked=True,
-                enforce_student=True,
             )
 
 
