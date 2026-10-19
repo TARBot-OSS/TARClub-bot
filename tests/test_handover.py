@@ -31,7 +31,9 @@ async def _society_with_term(db: Database, guild_id: int) -> tuple[int, dict]:
 @pytest.mark.asyncio
 async def test_proposer_cannot_confirm_own_handover(db: Database):
     society_id, term = await _society_with_term(db, 900000000001)
-    await db.propose_handover(society_id, term["id"], "2026/2027", None, proposed_by=1)
+    await db.propose_handover(
+        society_id, term["id"], "2026/2027", None, proposed_by=1, incoming_chair_id=2
+    )
 
     assert await db.confirm_handover(society_id, confirmed_by=1) is None
 
@@ -42,7 +44,9 @@ async def test_proposer_cannot_confirm_own_handover(db: Database):
 @pytest.mark.asyncio
 async def test_second_member_confirms_and_handover_executes_once(db: Database):
     society_id, term = await _society_with_term(db, 900000000002)
-    await db.propose_handover(society_id, term["id"], "2026/2027", "AGM resolved", proposed_by=1)
+    await db.propose_handover(
+        society_id, term["id"], "2026/2027", "AGM resolved", proposed_by=1, incoming_chair_id=2
+    )
 
     new_term_id = await db.confirm_handover(society_id, confirmed_by=2)
     assert new_term_id is not None
@@ -58,22 +62,41 @@ async def test_second_member_confirms_and_handover_executes_once(db: Database):
 
 
 @pytest.mark.asyncio
+async def test_pending_handover_records_incoming_chair(db: Database):
+    society_id, term = await _society_with_term(db, 900000000005)
+    await db.propose_handover(
+        society_id, term["id"], "2026/2027", None, proposed_by=1, incoming_chair_id=42
+    )
+
+    pending = await db.get_pending_handover(society_id)
+    assert pending["incoming_chair_id"] == 42
+
+
+@pytest.mark.asyncio
 async def test_only_one_pending_handover_per_society(db: Database):
     society_id, term = await _society_with_term(db, 900000000003)
-    await db.propose_handover(society_id, term["id"], "2026/2027", None, proposed_by=1)
+    await db.propose_handover(
+        society_id, term["id"], "2026/2027", None, proposed_by=1, incoming_chair_id=2
+    )
 
     with pytest.raises(sqlite3.IntegrityError):
-        await db.propose_handover(society_id, term["id"], "2027/2028", None, proposed_by=2)
+        await db.propose_handover(
+            society_id, term["id"], "2027/2028", None, proposed_by=2, incoming_chair_id=3
+        )
 
 
 @pytest.mark.asyncio
 async def test_cancel_clears_pending_and_allows_new_proposal(db: Database):
     society_id, term = await _society_with_term(db, 900000000004)
-    await db.propose_handover(society_id, term["id"], "2026/2027", None, proposed_by=1)
+    await db.propose_handover(
+        society_id, term["id"], "2026/2027", None, proposed_by=1, incoming_chair_id=2
+    )
 
     assert await db.cancel_handover(society_id, cancelled_by=1) is True
     assert await db.get_pending_handover(society_id) is None
     assert await db.cancel_handover(society_id, cancelled_by=1) is False
 
-    await db.propose_handover(society_id, term["id"], "2026/2027", None, proposed_by=2)
+    await db.propose_handover(
+        society_id, term["id"], "2026/2027", None, proposed_by=2, incoming_chair_id=3
+    )
     assert await db.get_pending_handover(society_id) is not None

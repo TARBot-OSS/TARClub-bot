@@ -303,8 +303,8 @@ sequenceDiagram
 ```
 
 ### Handover Safety Guards
-1. **Two-Person Quorum** (implemented): `/term handover` proposes the handover; a different member with `MANAGE_TERMS` or the Server Owner runs `/term confirm-handover`. `/term cancel-handover` clears a pending proposal. Only one proposal may be pending per society. Not yet implemented: the spec's check that the confirmer is the incoming chairperson, because the incoming roster is not stored.
-2. **Alumni Preservation** (not yet implemented): The spec calls for outgoing members to receive `@Alumni Exco [Term]`. The current handover updates the database and posts the proclamation only; Discord roles are not changed.
+1. **Two-Person Quorum** (implemented): `/term handover` proposes the handover and names the `incoming_chair`. That member or the Server Owner runs `/term confirm-handover`; the proposer cannot confirm and cannot be the incoming chair. `/term cancel-handover` clears a pending proposal. Only one proposal may be pending per society.
+2. **Alumni Preservation** (implemented): On confirm, the bot creates `@Alumni Exco (<academic year>)` if missing and grants it to every member on the outgoing roster. The proclamation reports how many grants succeeded. Not yet implemented: removing position roles from outgoing members, because the bot does not create position roles (`discord_role_id` is never set), and assigning incoming roles automatically.
 3. **Audit Trail**: Generates a tamper-proof markdown/PDF record of the completed term's tenure.
 
 ---

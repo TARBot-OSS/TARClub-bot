@@ -189,6 +189,7 @@ class Database(DatabaseBase):
                 next_academic_year TEXT NOT NULL,
                 handover_notes TEXT,
                 proposed_by INTEGER NOT NULL,
+                incoming_chair_id INTEGER,
                 status TEXT NOT NULL DEFAULT 'PENDING',
                 resolved_by INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -198,6 +199,12 @@ class Database(DatabaseBase):
                 ON term_handover_requests(society_id) WHERE status = 'PENDING';
             """
         )
+        cursor = await self.conn.execute("PRAGMA table_info(term_handover_requests);")
+        existing_handover_cols = {row[1] for row in await cursor.fetchall()}
+        if "incoming_chair_id" not in existing_handover_cols:
+            await self.conn.execute(
+                "ALTER TABLE term_handover_requests ADD COLUMN incoming_chair_id INTEGER;"
+            )
         # Ensure is_private column exists in societies
         cursor = await self.conn.execute("PRAGMA table_info(societies);")
         existing_soc_cols = {row[1] for row in await cursor.fetchall()}
@@ -545,17 +552,26 @@ class Database(DatabaseBase):
         next_academic_year: str,
         handover_notes: str | None,
         proposed_by: int,
+        incoming_chair_id: int,
     ) -> int:
         """Open a pending handover. Raises sqlite3.IntegrityError if one is already pending."""
         try:
             cursor = await self.conn.execute(
                 """
                 INSERT INTO term_handover_requests
-                    (society_id, current_term_id, next_academic_year, handover_notes, proposed_by)
-                VALUES (?, ?, ?, ?, ?)
+                    (society_id, current_term_id, next_academic_year, handover_notes,
+                     proposed_by, incoming_chair_id)
+                VALUES (?, ?, ?, ?, ?, ?)
                 RETURNING id;
                 """,
-                (society_id, current_term_id, next_academic_year, handover_notes, proposed_by),
+                (
+                    society_id,
+                    current_term_id,
+                    next_academic_year,
+                    handover_notes,
+                    proposed_by,
+                    incoming_chair_id,
+                ),
             )
             row = await cursor.fetchone()
             await self.conn.commit()
