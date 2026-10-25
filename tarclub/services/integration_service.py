@@ -12,6 +12,8 @@ import time
 from collections.abc import Collection, Mapping
 from typing import TYPE_CHECKING, Any
 
+from tarbot_console.contracts import TARVERI_SCHEMA_VERSION, TARVERI_STUDENT_ROLE_NAMES
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -19,23 +21,20 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("tarclub.services.integration")
 
-# Exact role names TARVeri assigns to verified students (matched case-insensitively,
-# with an optional "TARUMT " prefix). Guest and organizational roles never match.
-TARVERI_STUDENT_ROLE_NAMES = {
-    "verified",
-    "fafb",
-    "cpus",
-    "focs",
-    "fcci",
-    "foas",
-    "fobe",
-    "fssh",
-    "foet",
-    "bachelor's degree",
-    "diploma",
-    "foundation",
-    "postgraduate",
-}
+# Columns read from TARVeri's verifications table. Each must be in tarbot_console.contracts.
+TARVERI_READ_COLUMNS = (
+    "discord_user_id",
+    "faculty_code",
+    "campus_code",
+    "level_code",
+    "programme_code",
+    "is_alumni",
+    "card_expiry_date",
+    "verified_at",
+)
+
+# Schema versions already warned about, so a mismatch is logged once per process.
+_warned_schema_versions: set[int] = set()
 
 
 class IntegrationService:
@@ -94,13 +93,19 @@ class IntegrationService:
             uri = f"file:{tarveri_db_path.resolve()}?mode=ro"
             with sqlite3.connect(uri, uri=True, timeout=5.0) as conn:
                 conn.row_factory = sqlite3.Row
+                version = conn.execute("PRAGMA user_version").fetchone()[0]
+                if version != TARVERI_SCHEMA_VERSION and version not in _warned_schema_versions:
+                    _warned_schema_versions.add(version)
+                    logger.warning(
+                        "TARVeri database schema version is %s; TARClub expects %s. "
+                        "Check the verifications columns.",
+                        version,
+                        TARVERI_SCHEMA_VERSION,
+                    )
+                select_columns = ", ".join(TARVERI_READ_COLUMNS)
                 rows = conn.execute(
-                    f"""
-                    SELECT discord_user_id, faculty_code, campus_code, level_code,
-                           programme_code, is_alumni, card_expiry_date, verified_at
-                    FROM verifications
-                    WHERE discord_user_id IN ({placeholders});
-                    """,
+                    f"SELECT {select_columns} FROM verifications "
+                    f"WHERE discord_user_id IN ({placeholders});",
                     ids,
                 ).fetchall()
                 return {row["discord_user_id"]: dict(row) for row in rows}
