@@ -5,4 +5,4 @@ prompt_toolkit>=3.0.0
 ruff>=0.5.0
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
-tarbot-console @ git+https://github.com/TARBot-OSS/tarbot-console.git@a4b68c8faa03ba379909de98a1bfe425e394b216
+tarbot-console @ git+https://github.com/TARBot-OSS/tarbot-console.git@c44054e0e503b2c1bca00ae98b55b4b9406df33c
