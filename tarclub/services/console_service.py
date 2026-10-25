@@ -12,12 +12,10 @@ from __future__ import annotations
 
 import logging
 import sys
-from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import discord
-from prompt_toolkit.completion import Completer, Completion
 from tarbot_console import ConsoleAwareStreamHandler, ConsoleCore
 
 if TYPE_CHECKING:
@@ -68,38 +66,6 @@ HELP_LINES = [
 ]
 
 
-class _ArgumentCompleter(Completer):
-    """Offers the words `rule` returns for an argument slot, else defers to the core completer."""
-
-    def __init__(self, base: Completer, rule: Callable[[list[str]], list[str] | None]) -> None:
-        self.base = base
-        self.rule = rule
-
-    def get_completions(self, document, complete_event):
-        word = document.get_word_before_cursor(WORD=True)
-        head = document.text_before_cursor[: len(document.text_before_cursor) - len(word)].split()
-        options = self.rule(head)
-        if options is None:
-            yield from self.base.get_completions(document, complete_event)
-            return
-        for option in options:
-            if option.lower().startswith(word.lower()):
-                yield Completion(option, start_position=-len(word))
-
-
-def _tarclub_argument_options(head: list[str]) -> list[str] | None:
-    # `privacy <guild_id> <bool>`
-    if len(head) == 2 and head[0] == "privacy":
-        return ["true", "false"]
-    # `token create <code> <name> <faculty> <is_private>`
-    if head[:2] == ["token", "create"]:
-        if len(head) == 4:
-            return FACULTY_CODES
-        if len(head) >= 5:
-            return ["true", "false"]
-    return None
-
-
 class ConsoleService(ConsoleCore):
     """Split-Screen admin TUI for TARClub."""
 
@@ -124,9 +90,17 @@ class ConsoleService(ConsoleCore):
         "reject": None,
     }
 
-    def _get_completer(self) -> Completer | None:
-        base = super()._get_completer()
-        return _ArgumentCompleter(base, _tarclub_argument_options) if base is not None else None
+    def argument_options(self, head: list[str]) -> list[str] | None:
+        # `privacy <guild_id> <bool>`
+        if len(head) == 2 and head[0] == "privacy":
+            return ["true", "false"]
+        # `token create <code> <name> <faculty> <is_private>`
+        if head[:2] == ["token", "create"]:
+            if len(head) == 4:
+                return FACULTY_CODES
+            if len(head) >= 5:
+                return ["true", "false"]
+        return None
 
     def __init__(self, bot: TARClubBot, db: Database, settings: Settings) -> None:
         super().__init__(bot, db, settings)
