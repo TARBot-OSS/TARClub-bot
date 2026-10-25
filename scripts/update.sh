@@ -40,6 +40,11 @@ PIP_BIN="${TARCLUB_PIP_BIN:-${VENV_DIR}/bin/pip}"
 BACKUP_DIR="${TARCLUB_BACKUP_DIR:-${PROJECT_ROOT}/backups}"
 DB_PATH="${TARCLUB_DATABASE_PATH:-tarclub.db}"
 SERVICE_NAME="${TARCLUB_SERVICE_NAME:-tarclub}"
+# Optional: tmux pane (session:window.pane) that runs the bot in the foreground. Restarted in place.
+TMUX_TARGET="${TARCLUB_TMUX_TARGET:-}"
+printf -v ROOT_Q '%q' "${PROJECT_ROOT}"
+printf -v PYTHON_Q '%q' "${PYTHON_BIN}"
+START_CMD="${TARCLUB_START_COMMAND:-${PYTHON_Q} -m tarclub}"
 REPO_URL="${TARCLUB_REPO_URL:-https://github.com/TARBot-OSS/TARClub-bot.git}"
 
 RED='\033[0;31m'
@@ -254,6 +259,56 @@ fi
 
 trap - ERR
 
+# Restart the bot in a tmux pane. Ctrl+C stops it (the console shuts down gracefully on an empty
+# prompt), then the pane's shell is started again with START_CMD. Never starts a second copy.
+restart_in_tmux() {
+    local target="$1"
+    local waited=0
+
+    if ! command -v tmux >/dev/null 2>&1; then
+        log_warn "TARCLUB_TMUX_TARGET is set but tmux is not installed."
+        return 1
+    fi
+    if ! tmux display-message -p -t "${target}" '#{pane_id}' >/dev/null 2>&1; then
+        log_warn "tmux pane '${target}' was not found."
+        return 1
+    fi
+
+    if ! is_pane_at_shell "${target}"; then
+        log_info "Stopping the bot in tmux pane '${target}'..."
+        tmux send-keys -t "${target}" C-c
+        while ! is_pane_at_shell "${target}"; do
+            sleep 1
+            waited=$((waited + 1))
+            if [ "${waited}" -eq 10 ]; then
+                log_warn "Bot still running after 10s. Sending Ctrl+C again."
+                tmux send-keys -t "${target}" C-c
+            fi
+            if [ "${waited}" -ge 60 ]; then
+                log_error "Bot did not stop within 60s. Not starting a second copy; restart it manually."
+                return 1
+            fi
+        done
+        log_success "Bot stopped."
+    fi
+
+    log_info "Starting the bot in tmux pane '${target}'..."
+    tmux send-keys -t "${target}" "cd ${ROOT_Q} && ${START_CMD}" Enter
+    sleep 5
+    if is_pane_at_shell "${target}"; then
+        log_error "Bot exited right after start. Last output:"
+        tmux capture-pane -p -t "${target}" | tail -n 20
+        return 1
+    fi
+    log_success "Bot started in tmux pane '${target}'."
+}
+
+is_pane_at_shell() {
+    local cmd
+    cmd="$(tmux display-message -p -t "$1" '#{pane_current_command}' 2>/dev/null)"
+    [[ "${cmd}" =~ ^-?(sh|bash|zsh|fish|dash)$ ]]
+}
+
 # ------------------------------------------------------------------------------
 # STEP 5: Restart Service
 # ------------------------------------------------------------------------------
@@ -279,6 +334,12 @@ if command -v systemctl >/dev/null 2>&1; then
     fi
 fi
 
+if [ "${RESTARTED}" = false ] && [ -n "${TMUX_TARGET}" ]; then
+    if restart_in_tmux "${TMUX_TARGET}"; then
+        RESTARTED=true
+    fi
+fi
+
 if [ "${RESTARTED}" = false ]; then
     log_info "No active systemd service '${SERVICE_NAME}' detected."
     log_info "If running manually, restart your bot process now:"
@@ -286,7 +347,11 @@ if [ "${RESTARTED}" = false ]; then
 fi
 
 echo -e "\n=============================================================================="
-log_success "TARClub update on stream '${TARGET_REMOTE}' (${NEW_COMMIT:0:7}) completed cleanly!"
+if [ -n "${TMUX_TARGET}" ] && [ "${RESTARTED}" = false ]; then
+    log_warn "Code and dependencies are updated, but the bot was NOT restarted. Restart it manually."
+else
+    log_success "TARClub update on stream '${TARGET_REMOTE}' (${NEW_COMMIT:0:7}) completed cleanly!"
+fi
 if [ -n "${SNAPSHOT_PATH}" ]; then
     log_info "Pre-update backup preserved at: ${SNAPSHOT_PATH}"
 fi
