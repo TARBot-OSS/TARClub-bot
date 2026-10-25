@@ -480,4 +480,3 @@ async def test_console_service_session_timeout(mock_bot, db: Database):
     with patch("sys.stdout", captured):
         await console.handle_command("status")
     assert "[AUTH REQUIRED]" in captured.getvalue()
-

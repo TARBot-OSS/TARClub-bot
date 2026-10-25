@@ -490,4 +490,3 @@ class ConsoleService(ConsoleCore):
                 )
             except Exception:
                 pass
-
