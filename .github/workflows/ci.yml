@@ -36,3 +36,15 @@ jobs:
       - name: Run Pytest Suite
         run: |
           pytest -v
+
+  updater-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Check vendored updater matches the pinned tarbot-console
+        run: |
+          REF="$(grep -o 'tarbot-console.git@[^ ]*' requirements.txt | cut -d@ -f2)"
+          curl -fsSL "https://raw.githubusercontent.com/TARBot-OSS/tarbot-console/${REF}/updater/bot_update_lib.sh" -o canonical_bot_update_lib.sh
+          diff -u canonical_bot_update_lib.sh scripts/bot_update_lib.sh
