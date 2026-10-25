@@ -11,12 +11,13 @@ The TUI, PAM login and session handling live in the shared `tarbot_console` pack
 from __future__ import annotations
 
 import logging
-import shlex
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import discord
+from prompt_toolkit.completion import Completer, Completion
 from tarbot_console import ConsoleAwareStreamHandler, ConsoleCore
 
 if TYPE_CHECKING:
@@ -26,46 +27,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("tarclub.console")
 
-
-AVAILABLE_COMMANDS = [
-    "help",
-    "status",
-    "guilds",
-    "societies",
-    "privacy",
-    "token",
-    "applications",
-    "approve",
-    "reject",
-    "say",
-    "eval",
-    "login",
-    "setup-admin",
-    "lock",
-    "logout",
-    "user",
-    "view",
-    "minimize",
-    "restore",
-    "clear",
-    "stop",
-    "exit",
-    "quit",
-]
-
-AUTH_LOCKED_COMMANDS = [
-    "help",
-    "?",
-    "login",
-    "setup-admin",
-    "view",
-    "minimize",
-    "restore",
-    "clear",
-    "stop",
-    "exit",
-    "quit",
-]
 
 FACULTY_CODES = [
     "FOCS",
@@ -107,48 +68,36 @@ HELP_LINES = [
 ]
 
 
-def _console_completer(text: str, state: int) -> str | None:
-    try:
-        import readline
+class _ArgumentCompleter(Completer):
+    """Offers the words `rule` returns for an argument slot, else defers to the core completer."""
 
-        buf = readline.get_line_buffer()
-        begidx = readline.get_begidx()
-        text_before = buf[:begidx].strip()
-        try:
-            words = shlex.split(text_before)
-        except ValueError:
-            words = text_before.split()
-    except Exception:
-        words = []
+    def __init__(self, base: Completer, rule: Callable[[list[str]], list[str] | None]) -> None:
+        self.base = base
+        self.rule = rule
 
-    matches: list[str] = []
-    if not words:
-        matches = [c for c in AVAILABLE_COMMANDS if c.startswith(text.lower())]
-    elif words == ["token"]:
-        matches = [sub for sub in ["create", "list", "revoke"] if sub.startswith(text.lower())]
-    elif words == ["token", "list"]:
-        matches = [
-            opt for opt in ["active", "used", "revoked", "all"] if opt.startswith(text.lower())
-        ]
-    elif words == ["user"]:
-        matches = [opt for opt in ["list", "add", "remove"] if opt.startswith(text.lower())]
-    elif len(words) == 2 and words[0] == "privacy":
-        matches = [opt for opt in ["true", "false"] if opt.startswith(text.lower())]
-    elif words == ["applications"]:
-        matches = [
-            opt
-            for opt in ["pending", "approved", "rejected", "all"]
-            if opt.startswith(text.lower())
-        ]
-    elif len(words) == 4 and words[0] == "token" and words[1] == "create":
-        matches = [f for f in FACULTY_CODES if f.startswith(text.upper())]
-    elif len(words) >= 5 and words[0] == "token" and words[1] == "create":
-        matches = [opt for opt in ["true", "false"] if opt.startswith(text.lower())]
+    def get_completions(self, document, complete_event):
+        word = document.get_word_before_cursor(WORD=True)
+        head = document.text_before_cursor[: len(document.text_before_cursor) - len(word)].split()
+        options = self.rule(head)
+        if options is None:
+            yield from self.base.get_completions(document, complete_event)
+            return
+        for option in options:
+            if option.lower().startswith(word.lower()):
+                yield Completion(option, start_position=-len(word))
 
-    if state < len(matches):
-        return matches[state]
+
+def _tarclub_argument_options(head: list[str]) -> list[str] | None:
+    # `privacy <guild_id> <bool>`
+    if len(head) == 2 and head[0] == "privacy":
+        return ["true", "false"]
+    # `token create <code> <name> <faculty> <is_private>`
+    if head[:2] == ["token", "create"]:
+        if len(head) == 4:
+            return FACULTY_CODES
+        if len(head) >= 5:
+            return ["true", "false"]
     return None
-
 
 
 class ConsoleService(ConsoleCore):
@@ -167,13 +116,17 @@ class ConsoleService(ConsoleCore):
         "privacy": None,
         "token": {
             "create": None,
-            "list": {"active": None, "used": None, "revoked": None},
+            "list": {"active": None, "used": None, "revoked": None, "all": None},
             "revoke": None,
         },
-        "applications": None,
+        "applications": {"pending": None, "approved": None, "rejected": None, "all": None},
         "approve": None,
         "reject": None,
     }
+
+    def _get_completer(self) -> Completer | None:
+        base = super()._get_completer()
+        return _ArgumentCompleter(base, _tarclub_argument_options) if base is not None else None
 
     def __init__(self, bot: TARClubBot, db: Database, settings: Settings) -> None:
         super().__init__(bot, db, settings)
@@ -537,4 +490,3 @@ class ConsoleService(ConsoleCore):
                 )
             except Exception:
                 pass
-

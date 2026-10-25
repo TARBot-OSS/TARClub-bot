@@ -155,55 +155,29 @@ async def test_console_commands(db: Database, mock_bot, tmp_path: Path):
     assert mock_bot.close.called
 
 
-def test_console_completer_tarclub():
-    from tarclub.services.console_service import _console_completer
+def _completions(console, text: str) -> list[str]:
+    from prompt_toolkit.document import Document
 
-    patch_empty_buf = patch("readline.get_line_buffer", return_value="")
-    patch_empty_idx = patch("readline.get_begidx", return_value=0)
-    with patch_empty_buf, patch_empty_idx:
-        # Empty line: matches top-level commands
-        first = _console_completer("", 0)
-        valid = (
-            "help",
-            "status",
-            "guilds",
-            "societies",
-            "privacy",
-            "token",
-            "applications",
-            "approve",
-            "reject",
-            "say",
-            "eval",
-            "clear",
-            "stop",
-            "exit",
-            "quit",
-        )
-        assert first in valid
+    completer = console._get_completer()
+    return [c.text for c in completer.get_completions(Document(text), None)]
 
-    patch_tok_buf = patch("readline.get_line_buffer", return_value="token ")
-    patch_tok_idx = patch("readline.get_begidx", return_value=6)
-    with patch_tok_buf, patch_tok_idx:
-        # Subcommand token options
-        assert _console_completer("", 0) == "create"
-        assert _console_completer("", 1) == "list"
-        assert _console_completer("", 2) == "revoke"
 
-    patch_list_buf = patch("readline.get_line_buffer", return_value="token list ")
-    patch_list_idx = patch("readline.get_begidx", return_value=11)
-    with patch_list_buf, patch_list_idx:
-        # Token list options
-        assert _console_completer("", 0) == "active"
-        assert _console_completer("", 1) == "used"
-        assert _console_completer("", 2) == "revoked"
+def test_console_completer_tarclub_argument_slots():
+    from tarclub.services.console_service import FACULTY_CODES
 
-    patch_priv_buf = patch("readline.get_line_buffer", return_value="privacy 12345 ")
-    patch_priv_idx = patch("readline.get_begidx", return_value=14)
-    with patch_priv_buf, patch_priv_idx:
-        # Privacy boolean options
-        assert _console_completer("", 0) == "true"
-        assert _console_completer("", 1) == "false"
+    settings = MagicMock(spec=Settings, console_session_timeout=300.0)
+    console = ConsoleService(MagicMock(), MagicMock(), settings)
+    console.is_authenticated = True
+
+    assert _completions(console, "token ") == ["create", "list", "revoke"]
+    assert _completions(console, "token list ") == ["active", "used", "revoked", "all"]
+    assert _completions(console, "applications ") == ["pending", "approved", "rejected", "all"]
+    assert _completions(console, "privacy 12345 ") == ["true", "false"]
+    assert _completions(console, "token create CODE Name ") == FACULTY_CODES
+    assert _completions(console, "token create CODE Name f") == [
+        c for c in FACULTY_CODES if c.startswith("F")
+    ]
+    assert _completions(console, "token create CODE Name FOCS ") == ["true", "false"]
 
 
 def test_console_escable_help_tarclub(mock_bot, tmp_path: Path):
@@ -506,4 +480,3 @@ async def test_console_service_session_timeout(mock_bot, db: Database):
     with patch("sys.stdout", captured):
         await console.handle_command("status")
     assert "[AUTH REQUIRED]" in captured.getvalue()
-
